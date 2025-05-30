@@ -14,6 +14,7 @@ import (
 	"xiaozhi-esp32-server-golang/internal/domain/llm"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
 	llm_memory "xiaozhi-esp32-server-golang/internal/domain/llm/memory"
+	"xiaozhi-esp32-server-golang/internal/domain/vad"
 
 	types_audio "xiaozhi-esp32-server-golang/internal/data/audio"
 	. "xiaozhi-esp32-server-golang/internal/data/client"
@@ -135,30 +136,39 @@ func HandleLLMResponse(ctx context.Context, state *ClientState, llmResponseChann
 func ProcessVadAudio(state *ClientState) {
 	go func() {
 		audioFormat := state.InputAudioFormat
-		audioProcesser, err := audio.GetAudioProcesser(audioFormat.SampleRate, audioFormat.Channels, audioFormat.FrameDuration)
+		audioProcessor, err := audio.GetAudioProcesser(
+			audioFormat.SampleRate,
+			audioFormat.Channels,
+			audioFormat.FrameDuration,
+		)
 		if err != nil {
 			log.Errorf("获取解码器失败: %v", err)
 			return
 		}
-		pcmFrame := make([]float32, state.AsrAudioBuffer.PcmFrameSize)
 
+		// 计算 VAD 帧大小（样本数）
+		frameSize := (audioFormat.SampleRate * audioFormat.FrameDuration) / 1000
+		frameBytes := frameSize * 2 // 16-bit = 2字节/样本
+
+		// 创建 int16 缓冲区（足够容纳一帧数据）
+		int16Buffer := make([]int16, frameSize*audioFormat.Channels)
+		byteBuffer := make([]byte, 0, 2048) // 字节缓冲区
+
+		// 计算需要多少帧进行 VAD 检测
 		vadNeedGetCount := 60 / audioFormat.FrameDuration
 
 		var skipVad bool
 		for {
-			//sessionCtx := state.GetSessionCtx()
 			select {
 			case opusFrame, ok := <-state.OpusAudioBuffer:
-				if state.GetClientVoiceStop() { //已停止 说话 则不接收音频数据
-					//log.Infof("客户端停止说话, 跳过音频数据")
+				if state.GetClientVoiceStop() {
 					continue
 				}
-				log.Debugf("processAsrAudio 收到音频数据, len: %d", len(opusFrame))
 				if !ok {
-					log.Debugf("processAsrAudio 音频通道已关闭")
+					log.Debugf("音频通道已关闭")
 					return
 				}
-				log.Debugf("clientVoiceStop: %+v, asrDataSize: %d\n", state.GetClientVoiceStop(), state.AsrAudioBuffer.GetAsrDataSize())
+
 				clientHaveVoice := state.GetClientHaveVoice()
 				var haveVoice bool
 				if state.ListenMode != "auto" {
@@ -167,81 +177,119 @@ func ProcessVadAudio(state *ClientState) {
 					skipVad = true
 				}
 
-				n, err := audioProcesser.DecoderFloat32(opusFrame, pcmFrame)
+				// 直接解码为 int16
+				n, err := audioProcessor.Decoder(opusFrame, int16Buffer)
 				if err != nil {
 					log.Errorf("解码失败: %v", err)
 					continue
 				}
 
-				var vadPcmData []float32
-				pcmData := pcmFrame[:n]
+				// 获取实际解码的样本
+				decodedSamples := int16Buffer[:n]
+
+				// 处理多声道：转换为单声道（VAD 需要单声道）
+				var monoPCM []int16
+				if audioFormat.Channels > 1 {
+					monoPCM = convertToMono(decodedSamples, audioFormat.Channels)
+				} else {
+					monoPCM = decodedSamples
+				}
+
+				// 当检测到语音时，保存音频数据到缓冲区（ASR 需要 float32）
+				if clientHaveVoice || haveVoice {
+					floatData := int16ToFloat32(monoPCM)
+					state.AudioBuffer = append(state.AudioBuffer, floatData...)
+					log.Debugf("添加到音频缓冲区，当前长度: %d", len(state.AudioBuffer))
+				}
+
+				// 转换为字节数据 (小端序)
+				byteData := int16ToBytes(monoPCM)
+				byteBuffer = append(byteBuffer, byteData...)
+
 				if !skipVad {
-					//如果已经检测到语音, 则不进行vad检测, 直接将pcmData传给asr
+					// 初始化VAD（如果未初始化）
 					if state.VadProvider == nil {
-						// 初始化vad
-						err = state.Vad.Init()
-						if err != nil {
-							log.Errorf("初始化vad失败: %v", err)
+						if err := initVAD(state, audioFormat); err != nil {
+							log.Errorf("初始化VAD失败: %v", err)
 							continue
 						}
 					}
-					//decode opus to pcm
-					state.AsrAudioBuffer.AddAsrAudioData(pcmData)
 
-					if state.AsrAudioBuffer.GetAsrDataSize() >= vadNeedGetCount*state.AsrAudioBuffer.PcmFrameSize {
-						//如果要进行vad, 至少要取60ms的音频数据
-						vadPcmData = state.AsrAudioBuffer.GetAsrData(vadNeedGetCount)
+					// 添加到ASR缓冲区（转换为 float32）
+					state.AsrAudioBuffer.AddAsrAudioData(int16ToFloat32(monoPCM))
 
-						haveVoice, err = state.VadProvider.IsVAD(vadPcmData)
-						if err != nil {
-							log.Errorf("processAsrAudio VAD检测失败: %v", err)
-							//删除
-							continue
+					// 检查是否有足够的音频数据用于VAD检测
+					if len(byteBuffer) >= frameBytes*vadNeedGetCount {
+						// 处理所有完整帧
+						frameCount := len(byteBuffer) / frameBytes
+						haveVoice = false
+						activeFrames := 0
+
+						for i := 0; i < frameCount; i++ {
+							start := i * frameBytes
+							end := start + frameBytes
+							frame := byteBuffer[start:end]
+
+							active, err := state.VadProvider.IsVAD(frame)
+							if err != nil {
+								log.Errorf("VAD检测失败: %v", err)
+								continue
+							}
+
+							if active {
+								activeFrames++
+							}
 						}
-						//首次触发识别到语音时,为了语音数据完整性 将vadPcmData赋值给pcmData, 之后的音频数据全部进入asr
+
+						// 超过一半帧有语音才认为有语音活动
+						haveVoice = activeFrames > frameCount/2
+
+						// 移除已处理的帧
+						if frameCount > 0 {
+							byteBuffer = byteBuffer[frameCount*frameBytes:]
+						}
+
+						log.Debugf("VAD检测结果: haveVoice=%v, 活跃帧=%d/%d",
+							haveVoice, activeFrames, frameCount)
+
+						// 首次检测到语音时，获取所有缓存数据
 						if haveVoice && !clientHaveVoice {
-							//首次获取全部pcm数据送入asr
-							pcmData = state.AsrAudioBuffer.GetAndClearAllData()
+							allData := state.AsrAudioBuffer.GetAndClearAllData()
+							state.AsrAudioChannel <- allData
 						}
 					}
-					log.Debugf("isVad pcmData len: %d, haveVoice: %v", len(pcmData), haveVoice)
 				}
 
 				if haveVoice {
-					log.Infof("检测到语音, len: %d", len(pcmData))
+					log.Infof("检测到语音, 样本数: %d", len(monoPCM))
 					state.SetClientHaveVoice(true)
 					state.SetClientHaveVoiceLastTime(time.Now().UnixMilli())
+
+					// 发送到ASR处理
+					if clientHaveVoice {
+						floatData := int16ToFloat32(monoPCM)
+						state.AsrAudioChannel <- floatData
+					}
 				} else {
-					//如果之前没有语音, 本次也没有语音, 则从缓存中删除
-					if !clientHaveVoice {
-						//保留近10帧
-						if state.AsrAudioBuffer.GetFrameCount() > vadNeedGetCount*3 {
-							state.AsrAudioBuffer.RemoveAsrAudioData(1)
-						}
-						continue
+					// 没有语音时清理缓存
+					if !clientHaveVoice && state.AsrAudioBuffer.GetFrameCount() > vadNeedGetCount*3 {
+						state.AsrAudioBuffer.RemoveAsrAudioData(1)
 					}
 				}
 
-				if clientHaveVoice {
-					//vad识别成功, 往asr音频通道里发送数据
-					log.Infof("vad识别成功, 往asr音频通道里发送数据, len: %d", len(pcmData))
-					state.AsrAudioChannel <- pcmData
-				}
-
-				//已经有语音了, 但本次没有检测到语音, 则需要判断是否已经停止说话
+				// 静音检测逻辑
 				lastHaveVoiceTime := state.GetClientHaveVoiceLastTime()
-
 				if clientHaveVoice && lastHaveVoiceTime > 0 && !haveVoice {
-					diffMilli := time.Now().UnixMilli() - lastHaveVoiceTime
-					if state.IsSilence(diffMilli) {
+					silenceDuration := time.Now().UnixMilli() - lastHaveVoiceTime
+					if state.IsSilence(silenceDuration) {
+						log.Info("检测到静音，停止ASR")
 						state.SetClientVoiceStop(true)
-						//客户端停止说话
 						state.Asr.Stop()
-						//释放vad
-						state.Vad.Reset()
-						//asr统计
-						state.SetStartAsrTs()
-						continue
+						state.VadProvider.Reset()
+
+						// 清空缓冲区
+						state.AudioBuffer = nil
+						byteBuffer = byteBuffer[:0]
 					}
 				}
 
@@ -250,6 +298,60 @@ func ProcessVadAudio(state *ClientState) {
 			}
 		}
 	}()
+}
+
+// 初始化VAD
+func initVAD(state *ClientState, format types_audio.AudioFormat) error {
+	vadConfig := map[string]interface{}{
+		"mode":              2,
+		"sample_rate":       format.SampleRate,
+		"frame_duration_ms": format.FrameDuration,
+		"channels":          1, // VAD只需要单声道
+	}
+
+	vadInstance, err := vad.NewWebRTCVAD(vadConfig)
+	if err != nil {
+		return fmt.Errorf("创建VAD实例失败: %v", err)
+	}
+
+	state.VadProvider = vadInstance
+	return nil
+}
+
+// 辅助函数：多声道转单声道
+func convertToMono(data []int16, channels int) []int16 {
+	if channels == 1 {
+		return data
+	}
+
+	mono := make([]int16, len(data)/channels)
+	for i := 0; i < len(mono); i++ {
+		var sum int32
+		for c := 0; c < channels; c++ {
+			sum += int32(data[i*channels+c])
+		}
+		mono[i] = int16(sum / int32(channels))
+	}
+	return mono
+}
+
+// 辅助函数：int16 转字节 (小端序)
+func int16ToBytes(data []int16) []byte {
+	buf := make([]byte, len(data)*2)
+	for i, v := range data {
+		buf[i*2] = byte(v)        // 低字节
+		buf[i*2+1] = byte(v >> 8) // 高字节
+	}
+	return buf
+}
+
+// 辅助函数：int16 转 float32 (用于ASR)
+func int16ToFloat32(data []int16) []float32 {
+	floatData := make([]float32, len(data))
+	for i, v := range data {
+		floatData[i] = float32(v) / 32768.0
+	}
+	return floatData
 }
 
 // handleTextMessage 处理文本消息

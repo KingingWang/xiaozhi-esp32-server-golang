@@ -3,107 +3,94 @@ package vad
 import (
 	"errors"
 	"fmt"
-	log "xiaozhi-esp32-server-golang/logger"
+
 	"sync"
 	"time"
 
+	"github.com/maxhawkins/go-webrtcvad" // 替换为WebRTC VAD包
 	"github.com/spf13/viper"
-	"github.com/streamer45/silero-vad-go/speech"
 )
 
-// VAD默认配置
+// VAD默认配置 - 更新配置项
 var defaultVADConfig = map[string]interface{}{
-	"threshold":               0.5,
+	"mode":                    2, // WebRTC VAD模式 (0-3)
 	"min_silence_duration_ms": int64(100),
-	"sample_rate":             16000,
-	"channels":                1,
-	"speech_pad_ms":           60,
+	"sample_rate":             16000, // 采样率必须为8k/16k/32k/48k
+	"channels":                1,     // 仅支持单声道
+	"frame_duration_ms":       20,    // 帧时长(ms)
 }
 
 // 资源池默认配置
 var defaultPoolConfig = struct {
-	// 池大小
-	MaxSize int
-	// 获取超时时间（毫秒）
+	MaxSize        int
 	AcquireTimeout int64
 }{
 	MaxSize:        10,
-	AcquireTimeout: 3000, // 3秒
+	AcquireTimeout: 3000,
 }
 
 // 配置项路径
 const (
-	// VAD模型路径配置项
-	ConfigKeyVADModelPath = "vad.model_path"
-	// VAD阈值配置项
-	ConfigKeyVADThreshold = "vad.threshold"
-	// VAD静默时长配置项
+	ConfigKeyVADMode         = "vad.mode"      // 新增模式配置
+	ConfigKeyVADThreshold    = "vad.threshold" // 不再使用
 	ConfigKeySilenceDuration = "vad.min_silence_duration_ms"
-	// VAD采样率配置项
-	ConfigKeySampleRate = "vad.sample_rate"
-	// VAD通道数配置项
-	ConfigKeyChannels = "vad.channels"
-	// VAD资源池大小配置项
-	ConfigKeyPoolSize = "vad.pool_size"
-	// VAD获取超时时间配置项
-	ConfigKeyAcquireTimeout = "vad.acquire_timeout_ms"
+	ConfigKeySampleRate      = "vad.sample_rate"
+	ConfigKeyChannels        = "vad.channels"
+	ConfigKeyFrameDuration   = "vad.frame_duration_ms" // 新增帧时长配置
+	ConfigKeyPoolSize        = "vad.pool_size"
+	ConfigKeyAcquireTimeout  = "vad.acquire_timeout_ms"
+	ConfigKeyVADModelPath    = "vad.model_path" // 不再需要，但保留避免配置错误
 )
 
-// 全局变量和初始化
+// 全局变量
 var (
-	// 全局解码器实例池
-	opusDecoderMap sync.Map
-	// 全局VAD检测器实例池
-	vadDetectorMap sync.Map
-	// 全局初始化锁
-	initMutex sync.Mutex
-	// 初始化标志
-	initialized = false
-	// 全局VAD资源池实例
+	opusDecoderMap        sync.Map
+	vadDetectorMap        sync.Map
+	initMutex             sync.Mutex
+	initialized           = false
 	globalVADResourcePool *VADResourcePool
+	vadFactoryFunc        func(string, map[string]interface{}) (VAD, error)
 )
 
-// 声明VAD工厂函数变量类型
-var vadFactoryFunc func(string, map[string]interface{}) (VAD, error)
-
-// 使用包初始化函数预创建资源
+// 初始化VAD模块
 func InitVAD() error {
-	log.Info("VAD模块初始化...")
+	fmt.Printf("VAD模块初始化...")
 
-	// 初始化VAD资源池（使用默认配置）
 	globalVADResourcePool = &VADResourcePool{
 		maxSize:        defaultPoolConfig.MaxSize,
 		acquireTimeout: defaultPoolConfig.AcquireTimeout,
 		defaultConfig:  defaultVADConfig,
-		initialized:    false, // 标记为未完全初始化，需要后续读取配置
+		initialized:    false,
 	}
 
-	// 初始化VAD工厂函数
 	vadFactoryFunc = createVADInstance
 
-	// 尝试自动从配置文件初始化
 	err := InitVADFromConfig()
 	if err != nil {
-		log.Errorf("VAD模块初始化失败: %v", err)
+		fmt.Printf("VAD模块初始化失败: %v", err)
 		return err
 	}
 
-	log.Info("VAD模块初始化完成")
+	fmt.Printf("VAD模块初始化完成")
 	return nil
 }
 
-// InitVADFromConfig 从配置文件初始化VAD模块
+// CreateVAD 创建指定类型的VAD实例（公共API）
+func CreateVAD(vadType string, config map[string]interface{}) (VAD, error) {
+	return vadFactoryFunc(vadType, config)
+}
+
+// 从配置初始化
 func InitVADFromConfig() error {
-	// 从viper获取模型路径
+	// 不再需要模型路径，但保留配置项兼容性
 	modelPath := viper.GetString(ConfigKeyVADModelPath)
 	if modelPath == "" {
-		log.Warnf("未从配置中找到VAD模型路径，请确保已配置 %s", ConfigKeyVADModelPath)
-		return errors.New("VAD模型路径未配置")
+		modelPath = "webrtc" // 填充虚拟值
 	}
 
-	// 获取其他可选配置
-	if threshold := viper.GetFloat64(ConfigKeyVADThreshold); threshold > 0 {
-		globalVADResourcePool.defaultConfig["threshold"] = threshold
+	// 更新配置
+	if mode := viper.GetInt(ConfigKeyVADMode); mode >= 0 && mode <= 3 {
+		globalVADResourcePool.defaultConfig["mode"] = mode
 	}
 
 	if silenceMs := viper.GetInt64(ConfigKeySilenceDuration); silenceMs > 0 {
@@ -114,11 +101,14 @@ func InitVADFromConfig() error {
 		globalVADResourcePool.defaultConfig["sample_rate"] = sampleRate
 	}
 
+	if frameDur := viper.GetInt(ConfigKeyFrameDuration); frameDur > 0 {
+		globalVADResourcePool.defaultConfig["frame_duration_ms"] = frameDur
+	}
+
 	if channels := viper.GetInt(ConfigKeyChannels); channels > 0 {
 		globalVADResourcePool.defaultConfig["channels"] = channels
 	}
 
-	// VAD资源池特有配置
 	if poolSize := viper.GetInt(ConfigKeyPoolSize); poolSize > 0 {
 		globalVADResourcePool.maxSize = poolSize
 	}
@@ -127,30 +117,26 @@ func InitVADFromConfig() error {
 		globalVADResourcePool.acquireTimeout = timeout
 	}
 
-	// 设置模型路径并完成初始化
+	// 设置虚拟模型路径
+	globalVADResourcePool.defaultConfig["model_path"] = modelPath
 	return initVADResourcePool(modelPath)
 }
 
-// 内部方法：初始化VAD资源池
+// 初始化资源池
 func initVADResourcePool(modelPath string) error {
-	if modelPath == "" {
-		return errors.New("模型路径不能为空")
-	}
-
 	initMutex.Lock()
 	defer initMutex.Unlock()
 
-	// 已经初始化过，检查模型路径是否变更
 	if globalVADResourcePool.initialized {
-		currentPath, ok := globalVADResourcePool.defaultConfig["model_path"].(string)
-		if ok && currentPath == modelPath {
-			return nil // 模型路径未变，无需重复初始化
-		}
-		log.Infof("VAD资源池模型路径变更，重新初始化: %s", modelPath)
+		return nil
 	}
 
-	// 设置模型路径
-	globalVADResourcePool.defaultConfig["model_path"] = modelPath
+	// 验证配置
+	// 删除未使用的 sampleRate 变量声明
+	channels := globalVADResourcePool.defaultConfig["channels"].(int)
+	if channels != 1 {
+		return errors.New("WebRTC VAD仅支持单声道(channels=1)")
+	}
 
 	// 初始化资源池
 	err := globalVADResourcePool.initialize()
@@ -159,197 +145,166 @@ func initVADResourcePool(modelPath string) error {
 	}
 
 	globalVADResourcePool.initialized = true
-	log.Infof("VAD资源池初始化完成，模型路径: %s，池大小: %d", modelPath, globalVADResourcePool.maxSize)
+	fmt.Printf("VAD资源池初始化完成，池大小: %d", globalVADResourcePool.maxSize)
 	return nil
 }
 
-// UpdateVADConfig 监听配置变更并更新VAD设置
-func UpdateVADConfig() error {
-	// 重新从配置文件加载
-	return InitVADFromConfig()
-}
-
-// VAD 语音活动检测接口
+// VAD接口
 type VAD interface {
-	// IsVAD 检测音频数据中的语音活动
-	IsVAD(pcmData []float32) (bool, error)
-	// Reset 重置检测器状态
+	IsVAD(pcmData []byte) (bool, error)
 	Reset() error
-	// Close 关闭并释放资源
 	Close() error
 }
 
-// SileroVAD Silero VAD模型实现
-type SileroVAD struct {
-	detector         *speech.Detector
-	vadThreshold     float32
-	silenceThreshold int64 // 单位:毫秒
-	sampleRate       int   // 采样率
-	channels         int   // 通道数
-	mu               sync.Mutex
+// WebRTCVAD实现
+type WebRTCVAD struct {
+	vad        *webrtcvad.VAD
+	mode       int
+	sampleRate int
+	frameSize  int // 每帧样本数
+	mu         sync.Mutex
 }
 
-// NewSileroVAD 创建SileroVAD实例
-func NewSileroVAD(config map[string]interface{}) (*SileroVAD, error) {
-	threshold, ok := config["threshold"].(float64)
-	if !ok {
-		threshold = 0.5 // 默认阈值
+// 创建WebRTCVAD实例
+func NewWebRTCVAD(config map[string]interface{}) (*WebRTCVAD, error) {
+	// 解析配置
+	mode, _ := config["mode"].(int)
+	sampleRate, _ := config["sample_rate"].(int)
+	frameDuration, _ := config["frame_duration_ms"].(int)
+	channels, _ := config["channels"].(int)
+
+	// 验证参数
+	if channels != 1 {
+		return nil, errors.New("WebRTC VAD仅支持单声道")
 	}
 
-	silenceMs, ok := config["min_silence_duration_ms"].(int64)
-	if !ok {
-		silenceMs = 100 // 默认500毫秒
-	}
+	// 计算帧大小
+	frameSize := (sampleRate * frameDuration) / 1000
 
-	sampleRate, ok := config["sample_rate"].(int)
-	if !ok {
-		sampleRate = 16000 // 默认采样率
-	}
-
-	channels, ok := config["channels"].(int)
-	if !ok {
-		channels = 1 // 默认单声道
-	}
-
-	speechPadMs, ok := config["speech_pad_ms"].(int)
-	if !ok {
-		speechPadMs = 30 // 默认语音前后填充
-	}
-
-	modelPath, ok := config["model_path"].(string)
-	if !ok {
-		return nil, errors.New("缺少模型路径配置")
-	}
-
-	// 创建语音检测器
-	detector, err := speech.NewDetector(speech.DetectorConfig{
-		ModelPath:            modelPath,
-		SampleRate:           sampleRate,
-		Threshold:            float32(threshold),
-		MinSilenceDurationMs: int(silenceMs),
-		SpeechPadMs:          speechPadMs,
-		LogLevel:             speech.LogLevelWarn,
-	})
+	// 创建VAD实例
+	vad, err := webrtcvad.New()
 	if err != nil {
 		return nil, err
 	}
 
-	return &SileroVAD{
-		detector:         detector,
-		vadThreshold:     float32(threshold),
-		silenceThreshold: silenceMs,
-		sampleRate:       sampleRate,
-		channels:         channels,
+	// 设置模式
+	if err := vad.SetMode(mode); err != nil {
+		return nil, err
+	}
+
+	// 验证帧参数
+	if ok := vad.ValidRateAndFrameLength(sampleRate, frameSize); !ok {
+		return nil, fmt.Errorf("无效的采样率或帧长度: rate=%d, frame=%d", sampleRate, frameSize)
+	}
+
+	return &WebRTCVAD{
+		vad:        vad,
+		mode:       mode,
+		sampleRate: sampleRate,
+		frameSize:  frameSize,
 	}, nil
 }
 
-// IsVAD 实现VAD接口的IsVAD方法
-func (s *SileroVAD) IsVAD(pcmData []float32) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// 检测语音活动// 检测语音活动
+func (w *WebRTCVAD) IsVAD(pcmData []byte) (bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
-	segments, err := s.detector.Detect(pcmData)
+	// 直接处理字节数据
+	active, err := w.vad.Process(w.sampleRate, pcmData)
 	if err != nil {
-		log.Errorf("检测失败: %s", err)
 		return false, err
 	}
-
-	for _, s := range segments {
-		log.Debugf("speech starts at %0.2fs", s.SpeechStartAt)
-		if s.SpeechEndAt > 0 {
-			log.Debugf("speech ends at %0.2fs", s.SpeechEndAt)
-		}
-	}
-
-	return len(segments) > 0, nil
+	return active, nil
 }
 
-// Close 关闭并释放资源
-func (s *SileroVAD) Close() error {
-	if s.detector != nil {
-		return s.detector.Destroy()
+// 辅助函数：float32转int16
+func float32ToInt16(data []float32) []int16 {
+	int16Data := make([]int16, len(data))
+	for i, v := range data {
+		// 范围转换 [-1.0, 1.0] -> [-32768, 32767]
+		val := v * 32768.0
+		if val > 32767.0 {
+			val = 32767.0
+		} else if val < -32768.0 {
+			val = -32768.0
+		}
+		int16Data[i] = int16(val)
 	}
+	return int16Data
+}
+
+// 辅助函数：int16转小端字节
+func int16ToBytes(data []int16) []byte {
+	buf := make([]byte, len(data)*2)
+	for i, v := range data {
+		buf[i*2] = byte(v)
+		buf[i*2+1] = byte(v >> 8)
+	}
+	return buf
+}
+
+func (w *WebRTCVAD) Reset() error {
+	// WebRTC VAD无状态，无需重置
 	return nil
 }
 
-// createVADInstance 创建指定类型的VAD实例（内部实现）
+func (w *WebRTCVAD) Close() error {
+	// go-webrtcvad不需要显式关闭
+	return nil
+}
+
+// 工厂函数
 func createVADInstance(vadType string, config map[string]interface{}) (VAD, error) {
 	switch vadType {
-	case "SileroVAD":
-		return NewSileroVAD(config)
+
+	case "WebRTCVAD":
+		return NewWebRTCVAD(config)
 	default:
 		return nil, errors.New("不支持的VAD类型: " + vadType)
 	}
 }
 
-// CreateVAD 创建指定类型的VAD实例（公共API）
-func CreateVAD(vadType string, config map[string]interface{}) (VAD, error) {
-	return vadFactoryFunc(vadType, config)
-}
-
-// VADResourcePool VAD资源池管理，不与会话ID绑定
+// VAD资源池（保持原有逻辑不变）
 type VADResourcePool struct {
-	// 可用的VAD实例队列
-	availableVADs chan VAD
-	// 已分配的VAD实例映射，用于跟踪和管理
-	allocatedVADs sync.Map
-	// 池大小配置
-	maxSize int
-	// 获取VAD超时时间（毫秒）
+	availableVADs  chan VAD
+	allocatedVADs  sync.Map
+	maxSize        int
 	acquireTimeout int64
-	// 默认VAD配置
-	defaultConfig map[string]interface{}
-	// 互斥锁，用于初始化和重置操作
-	mu sync.Mutex
-	// 是否已初始化标志
-	initialized bool
+	defaultConfig  map[string]interface{}
+	mu             sync.Mutex
+	initialized    bool
 }
 
-// initialize 初始化VAD资源池
 func (p *VADResourcePool) initialize() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// 已经初始化过，先关闭现有资源
+	// 清理现有资源
 	if p.availableVADs != nil {
 		close(p.availableVADs)
-		p.availableVADs = nil
-
-		// 释放所有已分配的VAD实例
-		p.allocatedVADs.Range(func(key, value interface{}) bool {
-			if sileroVAD, ok := value.(*SileroVAD); ok {
-				sileroVAD.Close()
-			}
-			p.allocatedVADs.Delete(key)
-			return true
-		})
+		for vad := range p.availableVADs {
+			vad.Close()
+		}
 	}
 
-	// 创建资源队列
+	// 创建新资源池
 	p.availableVADs = make(chan VAD, p.maxSize)
 
-	// 预创建VAD实例
+	// 预创建实例
 	for i := 0; i < p.maxSize; i++ {
-		vadInstance, err := CreateVAD("SileroVAD", p.defaultConfig)
+		vad, err := CreateVAD("WebRTCVAD", p.defaultConfig)
 		if err != nil {
-			// 关闭已创建的实例
+			// 清理已创建实例
 			for j := 0; j < i; j++ {
-				vad := <-p.availableVADs
-				if sileroVAD, ok := vad.(*SileroVAD); ok {
-					sileroVAD.Close()
-				}
+				v := <-p.availableVADs
+				v.Close()
 			}
-			close(p.availableVADs)
-			p.availableVADs = nil
-
-			return fmt.Errorf("预创建VAD实例失败: %v", err)
+			return fmt.Errorf("创建VAD实例失败: %v", err)
 		}
-
-		// 放入可用队列
-		p.availableVADs <- vadInstance
+		p.availableVADs <- vad
 	}
 
-	log.Infof("VAD资源池初始化完成，创建了 %d 个VAD实例", p.maxSize)
 	return nil
 }
 
@@ -362,7 +317,7 @@ func (p *VADResourcePool) AcquireVAD() (VAD, error) {
 	// 设置超时
 	timeout := time.After(time.Duration(p.acquireTimeout) * time.Millisecond)
 
-	log.Debugf("获取VAD实例, 当前可用: %d/%d", len(p.availableVADs), p.maxSize)
+	fmt.Printf("获取VAD实例, 当前可用: %d/%d", len(p.availableVADs), p.maxSize)
 
 	// 尝试从池中获取一个VAD实例
 	select {
@@ -374,7 +329,7 @@ func (p *VADResourcePool) AcquireVAD() (VAD, error) {
 		// 标记为已分配
 		p.allocatedVADs.Store(vad, time.Now())
 
-		log.Debugf("从VAD资源池获取了一个VAD实例，当前可用: %d/%d", len(p.availableVADs), p.maxSize)
+		fmt.Printf("从VAD资源池获取了一个VAD实例，当前可用: %d/%d", len(p.availableVADs), p.maxSize)
 		return vad, nil
 
 	case <-timeout:
@@ -388,7 +343,7 @@ func (p *VADResourcePool) ReleaseVAD(vad VAD) {
 		return
 	}
 
-	log.Debugf("释放VAD实例: %v, 当前可用: %d/%d", vad, len(p.availableVADs), p.maxSize)
+	fmt.Printf("释放VAD实例: %v, 当前可用: %d/%d", vad, len(p.availableVADs), p.maxSize)
 
 	// 检查是否是从此池分配的实例
 	if _, exists := p.allocatedVADs.Load(vad); exists {
@@ -397,7 +352,7 @@ func (p *VADResourcePool) ReleaseVAD(vad VAD) {
 
 		// 如果资源池已关闭，直接销毁实例
 		if p.availableVADs == nil {
-			if sileroVAD, ok := vad.(*SileroVAD); ok {
+			if sileroVAD, ok := vad.(*WebRTCVAD); ok {
 				sileroVAD.Close()
 			}
 			return
@@ -406,16 +361,16 @@ func (p *VADResourcePool) ReleaseVAD(vad VAD) {
 		// 尝试放回资源池，如果满了就丢弃
 		select {
 		case p.availableVADs <- vad:
-			log.Debugf("VAD实例已归还资源池，当前可用: %d/%d", len(p.availableVADs), p.maxSize)
+			fmt.Printf("VAD实例已归还资源池，当前可用: %d/%d", len(p.availableVADs), p.maxSize)
 		default:
 			// 资源池满了，直接关闭实例
-			if sileroVAD, ok := vad.(*SileroVAD); ok {
+			if sileroVAD, ok := vad.(*WebRTCVAD); ok {
 				sileroVAD.Close()
 			}
-			log.Warn("VAD资源池已满，多余实例已销毁")
+			fmt.Printf("VAD资源池已满，多余实例已销毁")
 		}
 	} else {
-		log.Warn("尝试释放非此资源池管理的VAD实例")
+		fmt.Printf("尝试释放非此资源池管理的VAD实例")
 	}
 }
 
@@ -459,7 +414,7 @@ func (p *VADResourcePool) Resize(newSize int) error {
 			// 尝试从可用队列中取出实例并关闭
 			select {
 			case vad := <-p.availableVADs:
-				if sileroVAD, ok := vad.(*SileroVAD); ok {
+				if sileroVAD, ok := vad.(*WebRTCVAD); ok {
 					sileroVAD.Close()
 				}
 			default:
@@ -468,7 +423,7 @@ func (p *VADResourcePool) Resize(newSize int) error {
 			}
 		}
 
-		log.Infof("VAD资源池大小已调整：%d -> %d", currentSize, newSize)
+		fmt.Printf("VAD资源池大小已调整：%d -> %d", currentSize, newSize)
 		return nil
 	}
 
@@ -479,13 +434,13 @@ func (p *VADResourcePool) Resize(newSize int) error {
 
 		// 创建新的VAD实例
 		for i := 0; i < toAdd; i++ {
-			vadInstance, err := CreateVAD("SileroVAD", p.defaultConfig)
+			vadInstance, err := CreateVAD("WebRTCVAD", p.defaultConfig)
 			if err != nil {
 				// 有错误发生，更新大小为当前已成功创建的实例数
 				actualNewSize := currentSize + i
 				p.maxSize = actualNewSize
 
-				log.Errorf("无法创建全部请求的VAD实例，资源池大小已调整为: %d", actualNewSize)
+				fmt.Printf("无法创建全部请求的VAD实例，资源池大小已调整为: %d", actualNewSize)
 				return fmt.Errorf("创建新VAD实例失败: %v", err)
 			}
 
@@ -495,17 +450,17 @@ func (p *VADResourcePool) Resize(newSize int) error {
 				// 成功放入队列
 			default:
 				// 队列已满，直接关闭实例
-				if sileroVAD, ok := vadInstance.(*SileroVAD); ok {
+				if sileroVAD, ok := vadInstance.(*WebRTCVAD); ok {
 					sileroVAD.Close()
 				}
-				log.Warn("无法将新创建的VAD实例放入可用队列，实例已销毁")
+				fmt.Printf("无法将新创建的VAD实例放入可用队列，实例已销毁")
 			}
 		}
 
 		// 更新大小配置
 		p.maxSize = newSize
 
-		log.Infof("VAD资源池大小已调整：%d -> %d", currentSize, newSize)
+		fmt.Printf("VAD资源池大小已调整：%d -> %d", currentSize, newSize)
 		return nil
 	}
 
@@ -524,7 +479,7 @@ func (p *VADResourcePool) Close() {
 
 		// 释放所有可用的VAD实例
 		for vad := range p.availableVADs {
-			if sileroVAD, ok := vad.(*SileroVAD); ok {
+			if sileroVAD, ok := vad.(*WebRTCVAD); ok {
 				sileroVAD.Close()
 			}
 		}
@@ -535,7 +490,7 @@ func (p *VADResourcePool) Close() {
 	// 释放所有已分配的VAD实例
 	p.allocatedVADs.Range(func(key, _ interface{}) bool {
 		vad := key.(VAD)
-		if sileroVAD, ok := vad.(*SileroVAD); ok {
+		if sileroVAD, ok := vad.(*WebRTCVAD); ok {
 			sileroVAD.Close()
 		}
 		p.allocatedVADs.Delete(key)
@@ -543,7 +498,7 @@ func (p *VADResourcePool) Close() {
 	})
 
 	p.initialized = false
-	log.Info("VAD资源池已关闭，所有资源已释放")
+	fmt.Printf("VAD资源池已关闭，所有资源已释放")
 }
 
 // GetVADResourcePool 获取全局VAD资源池实例
@@ -580,20 +535,7 @@ func ReleaseVAD(vad VAD) {
 	}
 }
 
-// Reset 重置VAD检测器状态
-func (s *SileroVAD) Reset() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.detector.Reset()
-}
-
 // SetThreshold 设置VAD检测阈值
-func (s *SileroVAD) SetThreshold(threshold float32) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *WebRTCVAD) SetThreshold(threshold float32) {
 
-	s.vadThreshold = threshold
-	// 注意：silero-vad-go 库的 detector 没有直接提供 SetThreshold 方法
-	// 只能修改实例的阈值，在下次检测时生效
 }
