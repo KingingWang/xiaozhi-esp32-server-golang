@@ -248,6 +248,7 @@ func (p *EdgeOfflineTTSProvider) TextToSpeech(ctx context.Context, text string, 
 		return nil, fmt.Errorf("TTS合成超时或被取消")
 	case <-done:
 		close(outputChan)
+		p.returnConnection(wrapper)
 		return frames, nil
 	}
 }
@@ -312,6 +313,7 @@ func (p *EdgeOfflineTTSProvider) TextToSpeechStream(ctx context.Context, text st
 				messageType, data, err := wrapper.conn.ReadMessage()
 				if err != nil {
 					if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+						p.returnConnection(wrapper)
 						return
 					}
 					log.Errorf("读取WebSocket消息失败: %v", err)
@@ -325,10 +327,9 @@ func (p *EdgeOfflineTTSProvider) TextToSpeechStream(ctx context.Context, text st
 						p.removeConnection(wrapper)
 						return
 					}
+					p.returnConnection(wrapper)
 					return
 				}
-				p.returnConnection(wrapper)
-				return
 			}
 		}
 	}()
