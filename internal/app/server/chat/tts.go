@@ -122,7 +122,7 @@ func (t *TTSManager) handleTts(ctx context.Context, llmResponse llm_common.LLMRe
 	}
 
 	// 发送音频帧
-	if err := t.SendTTSAudio(ctx, outputChan, llmResponse.IsStart); err != nil {
+	if err := t.SendTTSAudio(ctx, outputChan, llmResponse.IsStart, false); err != nil {
 		log.Errorf("发送 TTS 音频失败: %s, %v", llmResponse.Text, err)
 		return fmt.Errorf("发送 TTS 音频失败: %s, %v", llmResponse.Text, err)
 	}
@@ -143,7 +143,11 @@ func getAlignedDuration(startTime time.Time, frameDuration time.Duration) time.D
 	return time.Duration(alignedMs) * time.Millisecond
 }
 
-func (t *TTSManager) SendTTSAudio(ctx context.Context, audioChan chan []byte, isStart bool) error {
+func (t *TTSManager) SendAudio(ctx context.Context, audioChan chan []byte, isStart bool) error {
+	return t.SendTTSAudio(ctx, audioChan, isStart, true)
+}
+
+func (t *TTSManager) SendTTSAudio(ctx context.Context, audioChan chan []byte, isStart bool, isAudio bool) error {
 	totalFrames := 0 // 跟踪已发送的总帧数
 
 	isStatistic := true
@@ -155,6 +159,7 @@ func (t *TTSManager) SendTTSAudio(ctx context.Context, audioChan chan []byte, is
 
 	// 记录开始发送的时间戳
 	startTime := time.Now()
+	lastState := AudioChannelStateIdle // 记录上一次的状态
 
 	// 基于绝对时间的精确流控
 	frameDuration := time.Duration(t.clientState.OutputAudioFormat.FrameDuration) * time.Millisecond
@@ -163,6 +168,47 @@ func (t *TTSManager) SendTTSAudio(ctx context.Context, audioChan chan []byte, is
 
 	// 使用滑动窗口机制，确保对端始终缓存 cacheFrameCount 帧数据
 	for {
+		if isAudio {
+			audioCheckStartTime := time.Now()
+			t.clientState.AudioState.Lock.Lock()
+
+			log.Debugf("SendTTSAudio 音频状态: %s", t.clientState.AudioState.GetState())
+
+			stateCheckCount := 0
+			for t.clientState.AudioState.GetState() != AudioChannelStatePlaying {
+				stateCheckCount++
+				currentState := t.clientState.AudioState.GetState()
+
+				if currentState == AudioChannelStateIdle {
+					t.clientState.AudioState.Lock.Unlock()
+					return nil
+				} else if currentState == AudioChannelStatePause {
+					lastState = AudioChannelStatePause
+					t.clientState.AudioState.Cond.Wait() // Wait() 会自动释放锁，返回时会重新获取锁
+					// 继续循环重新检查条件
+				}
+			}
+
+			// 检查状态是否从 pause 变为 play，如果是则重置 startTime
+			if lastState == AudioChannelStatePause {
+				oldStartTime := startTime
+				// 计算已经播放的帧的时长
+				playedDuration := time.Duration(totalFrames) * frameDuration
+				// 重置 startTime，减去已经播放的时长
+				startTime = time.Now().Add(-playedDuration)
+				log.Infof("[SendTTSAudio] 状态从 pause 变为 play，重置 startTime: %v -> %v, 已播放帧数: %d, 已播放时长: %v",
+					oldStartTime, startTime, totalFrames, playedDuration)
+			}
+			lastState = AudioChannelStatePlaying
+
+			if stateCheckCount > 1 {
+				log.Infof("[SendTTSAudio] 状态检查完成，检查次数: %d, 总耗时: %v",
+					stateCheckCount, time.Since(audioCheckStartTime))
+			}
+
+			t.clientState.AudioState.Lock.Unlock()
+		}
+
 		// 计算下一帧应该发送的时间点
 		nextFrameTime := startTime.Add(time.Duration(totalFrames-cacheFrameCount) * frameDuration)
 		now := time.Now()
@@ -185,6 +231,7 @@ func (t *TTSManager) SendTTSAudio(ctx context.Context, audioChan chan []byte, is
 				log.Debugf("SendTTSAudio audioChan closed, exit, 总共发送 %d 帧", totalFrames)
 				return nil
 			}
+
 			// 发送当前帧
 			if err := t.serverTransport.SendAudio(frame); err != nil {
 				log.Errorf("发送 TTS 音频失败: 第 %d 帧, len: %d, 错误: %v", totalFrames, len(frame), err)
@@ -192,9 +239,9 @@ func (t *TTSManager) SendTTSAudio(ctx context.Context, audioChan chan []byte, is
 			}
 
 			totalFrames++
-			if totalFrames%100 == 0 {
-				log.Debugf("SendTTSAudio 已发送 %d 帧", totalFrames)
-			}
+			//if totalFrames%100 == 0 {
+			log.Debugf("SendTTSAudio 已发送 %d 帧", totalFrames)
+			//}
 
 			// 统计信息记录（仅在开始时记录一次）
 			if isStart && isStatistic && totalFrames == 1 {

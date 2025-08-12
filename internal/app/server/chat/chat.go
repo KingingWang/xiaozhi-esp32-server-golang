@@ -85,6 +85,10 @@ func GenClientState(pctx context.Context, deviceID string) (*ClientState, error)
 		maxSilenceDuration = 200
 	}
 
+	// 使用 NewAudioState 正确初始化 AudioState
+	audioState := NewAudioState()
+	audioState.Ctx, audioState.Cancel = context.WithCancel(context.Background())
+
 	clientState := &ClientState{
 		Dialogue:     &Dialogue{},
 		Abort:        false,
@@ -113,6 +117,7 @@ func GenClientState(pctx context.Context, deviceID string) (*ClientState, error)
 			SilenceThresholdTime: maxSilenceDuration,
 		},
 		SessionCtx: Ctx{},
+		AudioState: audioState, // 使用解引用的指针
 	}
 
 	historyMessages, err := llm_memory.Get().GetMessages(ctx, deviceID, 15)

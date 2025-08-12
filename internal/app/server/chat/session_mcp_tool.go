@@ -184,3 +184,27 @@ func getMusicURL(musicName string) (string, string, error) {
 	// 返回第一个搜索结果的URL
 	return musicItem.URL, musicItem.Title, nil
 }
+
+type ControlMusicParams struct {
+	Action string `json:"action" description:"控制音频播放状态，允许的值 pause、play、stop"`
+}
+
+func (c *ChatManager) LocalMcpControlMusic(ctx context.Context, controlParams *ControlMusicParams) error {
+	text := ""
+	if controlParams.Action == "pause" {
+		c.clientState.AudioState.SetPause()
+		text = "音频状态已暂停"
+		log.Infof("音乐已暂停")
+	} else if controlParams.Action == "play" {
+		c.clientState.AudioState.SetPlay()
+		text = "继续播放音乐"
+		log.Infof("音频状态已继续")
+	} else if controlParams.Action == "stop" {
+		c.clientState.AudioState.SetStop()
+		text = "音乐已停止"
+		log.Infof("音频状态已停止")
+	}
+
+	c.session.serverTransport.SendSentenceStart(text)
+	return nil
+}

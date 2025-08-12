@@ -89,6 +89,8 @@ type ClientState struct {
 
 	IsTtsStart        bool //是否tts开始
 	IsWelcomeSpeaking bool //是否已经欢迎语
+
+	AudioState *AudioState //播放音乐状态管理
 }
 
 // 历史消息相关的方法开始

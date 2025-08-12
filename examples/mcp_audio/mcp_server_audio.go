@@ -45,18 +45,19 @@ func NewMCPServer() *server.MCPServer {
 		),
 	), handleMusicPlayerTool)
 
-	mcpServer.AddTool(mcp.NewTool(string(VOLUME_CONTROL),
-		mcp.WithDescription("调整音量大小, 当用户想调整音量时使用此工具"),
-		mcp.WithNumber("volume",
-			mcp.Description("音量大小，范围1-100"),
-			mcp.Required(),
-		),
-	), handleVolumeControlTool)
+	/*
+		mcpServer.AddTool(mcp.NewTool(string(VOLUME_CONTROL),
+			mcp.WithDescription("调整音量大小, 当用户想调整音量时使用此工具"),
+			mcp.WithNumber("volume",
+				mcp.Description("音量大小，范围1-100"),
+				mcp.Required(),
+			),
+		), handleVolumeControlTool)
+	*/
 
 	mcpServer.AddResource(
 		mcp.NewResource(
 			"resource://read_from_http",
-			//"audio://music/{musicUrl}?start={start}&end={end}",
 			"audio resource",
 		),
 		handleAudioResource,
@@ -193,6 +194,7 @@ func handleSearchMusic(files []string, query string) (*mcp.CallToolResult, error
 func handlePlayMusic(musicName string) (*mcp.CallToolResult, error) {
 	realMusicName, musicUrl, err := GetMusicUrlByName(musicName)
 	if err != nil {
+		log.Printf("GetMusicUrlByName, musicName: %s, error: %+v", musicName, err)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				mcp.TextContent{
@@ -244,12 +246,12 @@ type MusicSearchResponse struct {
 }
 
 type MusicItem struct {
-	Type   string `json:"type"`
-	Link   string `json:"link"`
-	SongID string `json:"songid"`
+	Type string `json:"type"`
+	Link string `json:"link"`
+	//SongID string `json:"songid"`
 	Title  string `json:"title"`
 	Author string `json:"author"`
-	LRC    bool   `json:"lrc"`
+	LRC    string `json:"lrc"`
 	URL    string `json:"url"`
 	Pic    string `json:"pic"`
 }
@@ -272,14 +274,34 @@ func getMusicAudioData(musicName string) ([]byte, string, string, error) {
 	return body, realMusicName, musicUrl, nil
 }
 
+type MusicSource struct {
+	Url  string
+	Type string
+}
+
 func GetMusicUrlByName(musicName string) (string, string, error) {
+	sourceMap := map[string]MusicSource{
+		"txqq": {
+			Url:  "https://music.txqq.pro/",
+			Type: "migu",
+		},
+		"xmsj": {
+			Url:  "http://www.xmsj.org/",
+			Type: "netease",
+		},
+	}
+
+	sourceType := "xmsj"
+
+	sourceInfo := sourceMap[sourceType]
+
 	client := &http.Client{}
 
 	// 构建请求体
-	data := fmt.Sprintf("input=%s&filter=name&type=migu&page=1",
-		url.QueryEscape(musicName))
+	data := fmt.Sprintf("input=%s&filter=name&type=%s&page=1",
+		url.QueryEscape(musicName), sourceInfo.Type)
 
-	req, err := http.NewRequest("POST", "https://music.txqq.pro/",
+	req, err := http.NewRequest("POST", sourceInfo.Url,
 		strings.NewReader(data))
 	if err != nil {
 		return "", "", fmt.Errorf("创建请求失败: %v", err)
@@ -291,9 +313,9 @@ func GetMusicUrlByName(musicName string) (string, string, error) {
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-	req.Header.Set("Origin", "https://music.txqq.pro")
+	req.Header.Set("Origin", sourceInfo.Url)
 	req.Header.Set("Pragma", "no-cache")
-	req.Header.Set("Referer", "https://music.txqq.pro/")
+	req.Header.Set("Referer", sourceInfo.Url)
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
@@ -318,9 +340,16 @@ func GetMusicUrlByName(musicName string) (string, string, error) {
 		return "", "", fmt.Errorf("API请求失败，状态码: %d", resp.StatusCode)
 	}
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", fmt.Errorf("读取响应失败: %v", err)
+	}
+
+	//log.Printf("body: %s\n", string(body))
+
 	// 解析响应
 	var searchResp MusicSearchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
+	if err := json.Unmarshal(body, &searchResp); err != nil {
 		return "", "", fmt.Errorf("解析响应失败: %v", err)
 	}
 
@@ -332,20 +361,88 @@ func GetMusicUrlByName(musicName string) (string, string, error) {
 		return "", "", fmt.Errorf("未找到音乐: %s", musicName)
 	}
 
-	// 遍历数组，找到第一个URL不为空的音乐项
-	var musicItem *MusicItem
+	// 收集所有URL不为空的音乐项
+	var validMusicItems []*MusicItem
 	for i := range searchResp.Data {
 		if searchResp.Data[i].URL != "" {
-			musicItem = &searchResp.Data[i]
-			break
+			validMusicItems = append(validMusicItems, &searchResp.Data[i])
 		}
 	}
 
-	if musicItem == nil {
+	if len(validMusicItems) == 0 {
 		return "", "", fmt.Errorf("未找到有效的音乐链接: %s", musicName)
 	}
 
+	// 检测URL可用性，最多检测5个
+	musicItem, err := checkMusicUrlsAvailability(validMusicItems, 3)
+	if err != nil {
+		return "", "", fmt.Errorf("检测音乐链接可用性失败: %v", err)
+	}
+
+	if musicItem == nil {
+		return "", "", fmt.Errorf("未找到可用的音乐链接: %s", musicName)
+	}
+
 	return musicItem.Title, musicItem.URL, nil
+}
+
+// checkMusicUrlsAvailability 检测音乐URL的可用性，最多检测指定数量的URL
+func checkMusicUrlsAvailability(musicItems []*MusicItem, maxCheck int) (*MusicItem, error) {
+	if len(musicItems) == 0 {
+		return nil, fmt.Errorf("没有音乐项需要检测")
+	}
+
+	// 限制检测数量
+	if len(musicItems) > maxCheck {
+		musicItems = musicItems[:maxCheck]
+	}
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// 最多跟随5次重定向
+			if len(via) >= 2 {
+				return fmt.Errorf("重定向次数过多")
+			}
+			return nil
+		},
+	}
+
+	for _, item := range musicItems {
+		if item.URL == "" {
+			continue
+		}
+
+		// 创建HEAD请求
+		req, err := http.NewRequest("HEAD", item.URL, nil)
+		if err != nil {
+			log.Printf("创建HEAD请求失败: %v, URL: %s", err, item.URL)
+			continue
+		}
+
+		// 设置请求头
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Connection", "keep-alive")
+
+		// 发送请求
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("HEAD请求失败: %v, URL: %s", err, item.URL)
+			continue
+		}
+		defer resp.Body.Close()
+
+		// 检查状态码
+		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+			log.Printf("URL可用: %s, 状态码: %d", item.URL, resp.StatusCode)
+			return item, nil
+		}
+
+		log.Printf("URL不可用: %s, 状态码: %d", item.URL, resp.StatusCode)
+	}
+
+	return nil, fmt.Errorf("所有检测的URL都不可用")
 }
 
 func GetMusicDataByUrl(musicUrl string, start, end int) ([]byte, error) {

@@ -11,6 +11,7 @@ func (s *ChatSession) StopSpeaking(isSendTtsStop bool) {
 		s.serverTransport.SendTtsStop()
 	}
 
+	s.clientState.AudioState.SetPause()
 }
 
 func (s *ChatSession) MqttClose() {

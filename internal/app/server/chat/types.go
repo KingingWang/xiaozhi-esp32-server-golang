@@ -14,6 +14,9 @@ type ChatSessionOperator interface {
 	// LocalMcpPlayMusic 播放音乐
 	LocalMcpPlayMusic(ctx context.Context, params *PlayMusicParams) error
 
+	// LocalMcpControlMusic 控制音频播放状态
+	LocalMcpControlMusic(ctx context.Context, params *ControlMusicParams) error
+
 	// 未来可以根据需要添加其他操作
 	// GetDeviceID() string
 	// IsActive() bool

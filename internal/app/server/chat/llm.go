@@ -125,7 +125,10 @@ func (l *LLMManager) HandleLLMResponseChannelAsync(ctx context.Context, userMess
 			l.serverTransport.SendTtsStart()
 		}
 		onEndFunc = func(err error, args ...any) {
-			l.serverTransport.SendTtsStop()
+			//音频播放是异步的，非播放状态才发送tts stop
+			if l.clientState.AudioState.GetState() != AudioChannelStatePlaying {
+				l.serverTransport.SendTtsStop()
+			}
 		}
 	}
 
@@ -328,7 +331,11 @@ func (l *LLMManager) handleToolCallResponse(ctx context.Context, tools []schema.
 				log.Infof("工具调用结果: %s, 终止: %t", fcResult, mcpResp.IsTerminal())
 				return invokeToolSuccess, nil
 			}*/
-			contentList = mcpResp.GetContent()
+			if mcpResp.IsTerminal() {
+				shouldStopLLMProcessing = true
+			} else {
+				contentList = mcpResp.GetContent()
+			}
 		} else if toolCallResult, ok := l.handleToolResult(fcResult); ok {
 			if toolCallResult.IsError {
 				log.Errorf("工具调用失败: %s, 错误: %s", fcResult, toolCallResult.IsError)
@@ -343,8 +350,9 @@ func (l *LLMManager) handleToolCallResponse(ctx context.Context, tools []schema.
 					log.Debugf("调用工具 %s 返回音频资源长度: %d", toolName, len(audioContent.Data))
 
 					mcpContent = "执行成功"
+
 					//播放音频资源,此时mcpContent是
-					err := l.handleAudioContent(ctx, mcpContent, audioContent, &wg)
+					err := l.handleAudioContent(mcpContent, audioContent, &wg)
 					if err != nil {
 						log.Errorf("mcp播放音频资源失败: %v", err)
 						mcpContent = "执行失败"
@@ -354,7 +362,7 @@ func (l *LLMManager) handleToolCallResponse(ctx context.Context, tools []schema.
 				} else if resourceLink, ok := content.(mcp_go.ResourceLink); ok {
 					log.Debugf("调用工具 %s 返回资源链接: %+v", toolName, resourceLink)
 					mcpContent = "执行成功"
-					err := l.handleResourceLink(ctx, resourceLink, tool, &wg)
+					err := l.handleResourceLink(resourceLink, tool, &wg)
 					if err != nil {
 						log.Errorf("mcp播放资源链接失败: %v", err)
 						mcpContent = "执行失败"
@@ -374,7 +382,7 @@ func (l *LLMManager) handleToolCallResponse(ctx context.Context, tools []schema.
 		addMessageFunc(toolCall, result)
 	}
 
-	wg.Wait()
+	//wg.Wait()
 
 	// 如果工具调用成功且没有被标记为停止处理，则继续LLM调用
 	if invokeToolSuccess && !shouldStopLLMProcessing {
@@ -384,8 +392,11 @@ func (l *LLMManager) handleToolCallResponse(ctx context.Context, tools []schema.
 	return invokeToolSuccess, nil
 }
 
-func (l *LLMManager) handleResourceLink(ctx context.Context, resourceLink mcp_go.ResourceLink, toolCall tool.InvokableTool, wg *sync.WaitGroup) error {
+func (l *LLMManager) handleResourceLink(resourceLink mcp_go.ResourceLink, toolCall tool.InvokableTool, wg *sync.WaitGroup) error {
 	wg.Add(1)
+	l.clientState.AudioState.RestartSessionCtx()
+
+	ctx := l.clientState.AudioState.Ctx
 	//从resourceLink中获取资源
 	client := toolCall.(*mcp.McpTool).GetClient()
 
@@ -521,22 +532,28 @@ func (l *LLMManager) handleResourceLink(ctx context.Context, resourceLink mcp_go
 
 	playText := fmt.Sprintf("正在播放音乐: %s", resourceLink.Name)
 	l.serverTransport.SendSentenceStart(playText)
+	l.clientState.AudioState.SetPlay()
 
 	go func() {
 		defer func() {
 			l.serverTransport.SendSentenceEnd(playText)
 			log.Infof("音乐播放完成: %s", resourceLink.Name)
+			l.serverTransport.SendTtsStop()
+			l.clientState.AudioState.SetStop()
 		}()
 
-		l.ttsManager.SendTTSAudio(ctx, audioChan, true)
+		l.ttsManager.SendAudio(ctx, audioChan, true)
 		wg.Done()
 	}()
 
 	return nil
 }
 
-func (l *LLMManager) handleAudioContent(ctx context.Context, realMusicName string, audioContent mcp_go.AudioContent, wg *sync.WaitGroup) error {
+func (l *LLMManager) handleAudioContent(realMusicName string, audioContent mcp_go.AudioContent, wg *sync.WaitGroup) error {
 	wg.Add(1)
+	l.clientState.AudioState.RestartSessionCtx()
+	ctx := l.clientState.AudioState.Ctx
+
 	rawAudioData, err := base64.StdEncoding.DecodeString(audioContent.Data)
 	if err != nil {
 		log.Errorf("解码音频数据失败: %v", err)
@@ -554,11 +571,15 @@ func (l *LLMManager) handleAudioContent(ctx context.Context, realMusicName strin
 	l.serverTransport.SendSentenceStart(playText)
 
 	go func() {
+		l.clientState.AudioState.SetPlay()
 		defer func() {
 			l.serverTransport.SendSentenceEnd(playText)
 			log.Infof("音乐播放完成: %s", realMusicName)
+			l.serverTransport.SendTtsStop()
+			l.clientState.AudioState.SetStop()
 		}()
-		l.ttsManager.SendTTSAudio(ctx, audioChan, true)
+
+		l.ttsManager.SendAudio(ctx, audioChan, true)
 		wg.Done()
 	}()
 

@@ -52,6 +52,12 @@ func InitChatLocalMCPTools() {
 			Params:      PlayMusicParams{},
 			Handle:      playMusicHandler,
 		},*/
+		"control_audio": {
+			Name:        "control_audio",
+			Description: "控制音频播放状态，包括暂停、继续、停止",
+			Params:      ControlMusicParams{},
+			Handle:      controlAudioHandler,
+		},
 	}
 
 	for toolName, localTool := range localTools {
@@ -348,4 +354,36 @@ func GetMusicAudioData(ctx context.Context, musicParams *PlayMusicParams) ([]byt
 	log.Infof("获取音乐 %s 数据成功, 音频数据长度: %d", realMusicName, len(audioData))
 
 	return audioData, realMusicName, nil
+}
+
+func controlAudioHandler(ctx context.Context, argumentsInJSON string) (string, error) {
+	log.Info("执行控制音频工具")
+
+	var params ControlMusicParams
+	if argumentsInJSON != "" {
+		if err := json.Unmarshal([]byte(argumentsInJSON), &params); err != nil {
+			return "", fmt.Errorf("参数解析失败: %v", err)
+		}
+	}
+
+	chatSessionOperatorValue := ctx.Value("chat_session_operator")
+	if chatSessionOperatorValue != nil {
+		if chatSessionOperator, ok := chatSessionOperatorValue.(ChatSessionOperator); ok {
+			log.Info("找到ChatSessionOperator，正在调用LocalMcpControlMusic方法控制音频")
+			err := chatSessionOperator.LocalMcpControlMusic(ctx, &params)
+			if err != nil {
+				log.Errorf("控制音频失败: %v", err)
+				response := NewErrorResponse("control_audio", fmt.Sprintf("控制音频失败: %v", err), "CONTROL_ERROR", "请检查音频状态")
+				return response.ToJSON()
+			} else {
+				// 成功控制 - 动作类响应，终止后续处理
+				response := NewActionResponse("control_audio", "control_audio", "音频状态已成功控制", "completed", true)
+				response.Metadata = map[string]string{
+					"action": params.Action,
+				}
+				return response.ToJSON()
+			}
+		}
+	}
+	return "", fmt.Errorf("从context中未找到chat_session_operator")
 }
