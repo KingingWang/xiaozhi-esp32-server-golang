@@ -12,6 +12,7 @@ import (
 	"time"
 
 	. "xiaozhi-esp32-server-golang/internal/data/client"
+	i_redis "xiaozhi-esp32-server-golang/internal/db/redis"
 	"xiaozhi-esp32-server-golang/internal/domain/llm"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
 	llm_memory "xiaozhi-esp32-server-golang/internal/domain/llm/memory"
@@ -153,12 +154,22 @@ func (l *LLMManager) HandleLLMResponseChannelSync(ctx context.Context, userMessa
 			needSendTtsCmd = false
 		}
 	}
+	redisClient := i_redis.GetClient()
+
+	suffix := time.Now().UnixNano()
+	queueKey := "DHQA_AUDIO_QUEUE"
+
+	startKey := fmt.Sprintf("%s%d", "##AUDIO START##", suffix)
+	endKey := fmt.Sprintf("%s%d", "##AUDIO END##", suffix)
+
 	if needSendTtsCmd {
 		l.serverTransport.SendTtsStart()
+		redisClient.RPush(ctx, queueKey, []byte(startKey))
 	}
 	ok, err := l.handleLLMResponse(ctx, userMessage, llmResponseChannel)
 	if needSendTtsCmd {
 		l.serverTransport.SendTtsStop()
+		redisClient.RPush(ctx, queueKey, []byte(endKey))
 	}
 
 	return ok, err
