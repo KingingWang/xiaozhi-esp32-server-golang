@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 	. "xiaozhi-esp32-server-golang/internal/data/client"
 	i_redis "xiaozhi-esp32-server-golang/internal/db/redis"
@@ -159,21 +160,25 @@ func (t *TTSManager) SendTTSAudio(ctx context.Context, audioChan chan []byte, is
 	// 创建用于流控的缓冲通道
 	flowControlChan := make(chan []byte, 1000) // 大缓冲区避免阻塞
 
+	var wg sync.WaitGroup
+
+	wg.Add(2)
 	// 启动数字人音频处理协程
 	metaAudioChan := make(chan []byte, 1000)
-	go t.SendAudioToMetaHuman(ctx, metaAudioChan)
+	go t.SendAudioToMetaHuman(ctx, metaAudioChan, &wg)
 	defer func() {
 		close(metaAudioChan)
 	}()
 
 	// 启动流控处理协程
-	go t.processFlowControl(ctx, flowControlChan, cacheFrameCount, isStart, &isStatistic, &totalFrames)
+	go t.processFlowControl(ctx, flowControlChan, cacheFrameCount, isStart, &isStatistic, &totalFrames, &wg)
 	defer func() {
 		close(flowControlChan)
 	}()
 
 	log.Debugf("SendTTSAudio 开始，缓存帧数: %d", cacheFrameCount)
 
+	defer wg.Wait()
 	// 主循环：立即分发数据，不进行流控等待
 	for {
 		select {
@@ -205,10 +210,13 @@ func (t *TTSManager) SendTTSAudio(ctx context.Context, audioChan chan []byte, is
 			}
 		}
 	}
+	return nil
 }
 
 // 独立的流控处理协程
-func (t *TTSManager) processFlowControl(ctx context.Context, flowControlChan chan []byte, cacheFrameCount int, isStart bool, isStatistic *bool, totalFrames *int) {
+func (t *TTSManager) processFlowControl(ctx context.Context, flowControlChan chan []byte, cacheFrameCount int, isStart bool, isStatistic *bool, totalFrames *int, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	// 记录开始发送的时间戳
 	startTime := time.Now()
 
@@ -271,7 +279,8 @@ func (t *TTSManager) processFlowControl(ctx context.Context, flowControlChan cha
 }
 
 // 发送音频到数字人 redis队列
-func (t *TTSManager) SendAudioToMetaHuman(ctx context.Context, audioChan chan []byte) error {
+func (t *TTSManager) SendAudioToMetaHuman(ctx context.Context, audioChan chan []byte, wg *sync.WaitGroup) error {
+	defer wg.Done()
 	redisClient := i_redis.GetClient()
 
 	if redisClient == nil {
