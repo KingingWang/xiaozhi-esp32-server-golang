@@ -432,9 +432,10 @@ func (s *ChatSession) HandleMcpMessage(msg *ClientMessage) error {
 	mcpSession := mcp.GetDeviceMcpClient(s.clientState.DeviceID)
 	if mcpSession != nil {
 		select {
-		case s.serverTransport.McpRecvMsgChan <- msg.PayLoad:
+		case <-s.ctx.Done():
+			return nil
 		default:
-			log.Warnf("mcp 接收消息通道已满, 丢弃消息")
+			return s.serverTransport.HandleMcpMessage(msg.PayLoad)
 		}
 	}
 	return nil

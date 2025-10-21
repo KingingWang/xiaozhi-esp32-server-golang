@@ -10,6 +10,7 @@ import (
 	types_audio "xiaozhi-esp32-server-golang/internal/data/audio"
 	. "xiaozhi-esp32-server-golang/internal/data/client"
 	. "xiaozhi-esp32-server-golang/internal/data/msg"
+	log "xiaozhi-esp32-server-golang/logger"
 )
 
 // ServerTransport handles sending messages to the client via the transport layer
@@ -220,6 +221,24 @@ func (s *ServerTransport) RecvMcpMsg(ctx context.Context, timeOut int) ([]byte, 
 	case <-time.After(time.Duration(timeOut) * time.Millisecond):
 		return nil, fmt.Errorf("mcp 接收消息超时")
 	}
+}
+
+func (s *ServerTransport) HandleMcpMessage(payload []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("transport is closed")
+	}
+	select {
+	case s.McpRecvMsgChan <- payload:
+	default:
+		log.Warnf("mcp 接收消息通道已满, 丢弃消息")
+	}
+	return nil
+}
+
+func (s *ServerTransport) IsClosed() bool {
+	return s.closed
 }
 
 func (s *ServerTransport) Close() error {
