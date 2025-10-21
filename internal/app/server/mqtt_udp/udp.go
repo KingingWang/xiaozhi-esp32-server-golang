@@ -4,8 +4,15 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"net"
+	"sync"
 	"time"
+)
+
+const (
+	UdpSessionStatusActive = "active"
+	UdpSessionStatusClosed = "closed"
 )
 
 // Session 表示一个UDP会话
@@ -25,6 +32,8 @@ type UdpSession struct {
 	RemoteSeq   uint32
 	RecvChannel chan []byte //发送的音频数据
 	SendChannel chan []byte //接收的音频数据
+	Status      string
+	Lock        sync.Mutex
 }
 
 // decrypt 解密数据
@@ -83,7 +92,39 @@ func (s *UdpSession) GetAesKeyAndNonce() (string, string) {
 	return strAesKey, strFullNonce
 }
 
+func (s *UdpSession) RecvData(data []byte) (bool, error) {
+	s.Lock.Lock()
+	defer s.Lock.Unlock()
+	if s.Status == UdpSessionStatusClosed {
+		return false, nil
+	}
+	select {
+	case s.RecvChannel <- data:
+		return true, nil
+	default:
+		return false, fmt.Errorf("recv channel is full")
+	}
+}
+
+// SendAudioData 发送音频数据
+func (s *UdpSession) SendAudioData(data []byte) (bool, error) {
+	s.Lock.Lock()
+	defer s.Lock.Unlock()
+	if s.Status == UdpSessionStatusClosed {
+		return false, nil
+	}
+	select {
+	case s.SendChannel <- data:
+		return true, nil
+	default:
+		return false, fmt.Errorf("send channel is full")
+	}
+}
+
 func (s *UdpSession) Destroy() {
+	s.Lock.Lock()
+	defer s.Lock.Unlock()
+	s.Status = UdpSessionStatusClosed
 	close(s.RecvChannel)
 	close(s.SendChannel)
 }

@@ -136,12 +136,21 @@ func (s *UdpServer) processPacket(addr *net.UDPAddr, data []byte) {
 		return
 	}
 	Debugf("收到音频数据, addr: %s, 大小: %d 字节", addr, len(decrypted))
-	select {
+	ok, err := udpSession.RecvData(decrypted)
+	if err != nil {
+		Errorf("addr: %s 接收数据失败: %v", addr, err)
+		return
+	}
+	if !ok {
+		Warnf("addr: %s 接收数据失败, 通道已满", addr)
+		return
+	}
+	/*select {
 	case udpSession.RecvChannel <- decrypted:
 		return
 	default:
 		Warnf("udpSession.RecvChannel is full, addr: %s", addr)
-	}
+	}*/
 }
 
 // cleanupSessions 清理过期会话
@@ -209,6 +218,8 @@ func (s *UdpServer) CreateSession(deviceId, clientId string) *UdpSession {
 		Block:       block,
 		RecvChannel: make(chan []byte, 100),
 		SendChannel: make(chan []byte, 100),
+		Status:      UdpSessionStatusActive,
+		Lock:        sync.Mutex{},
 	}
 	//通过channel发送音频数据, 当channel关闭的时候停止
 	go func() {

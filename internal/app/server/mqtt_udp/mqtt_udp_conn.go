@@ -96,25 +96,24 @@ func (c *MqttUdpConn) RecvCmd(ctx context.Context, timeout int) ([]byte, error) 
 	}
 }
 
-func (c *MqttUdpConn) PushAudioDataToRecvAudio(msg []byte) error {
-	select {
-	case c.UdpSession.RecvChannel <- msg:
-		c.lastActiveTs = time.Now().Unix()
-		return nil
-	default:
-		return errors.New("recvAudioChan is full")
-	}
-}
-
 // SendAudio 通过 MQTT-UDP 发送音频（需对接实际发送逻辑）
 func (c *MqttUdpConn) SendAudio(audio []byte) error {
-	select {
-	case c.UdpSession.SendChannel <- audio:
-		c.lastActiveTs = time.Now().Unix()
-		return nil
-	default:
+	ok, err := c.UdpSession.SendAudioData(audio)
+	if err != nil {
+		return err
+	}
+	if !ok {
 		return errors.New("sendAudioChan is full")
 	}
+	return nil
+	/*
+		select {
+		case c.UdpSession.SendChannel <- audio:
+			c.lastActiveTs = time.Now().Unix()
+			return nil
+		default:
+			return errors.New("sendAudioChan is full")
+		}*/
 }
 
 // RecvAudio 接收音频数据
