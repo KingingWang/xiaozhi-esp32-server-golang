@@ -21,6 +21,7 @@ type Mem0Client struct {
 	mu              sync.RWMutex
 	EnableSearch    bool    `mapstructure:"enable_search"`
 	SearchThreshold float64 `mapstructure:"search_threshold"`
+	SearchTopk      int     `mapstructure:"search_topk"`
 }
 
 // Mem0Config 配置结构
@@ -54,6 +55,7 @@ func GetMem0ClientWithConfig(config map[string]interface{}) (*Mem0Client, error)
 	configOnce.Do(func() {
 		var enableSearch bool = true
 		var searchThreshold float64 = 0.5
+		var searchTopk int = 3
 		// 解析配置到结构体
 		var mem0Cfg Mem0Config
 
@@ -66,6 +68,12 @@ func GetMem0ClientWithConfig(config map[string]interface{}) (*Mem0Client, error)
 		if searchThresholdInterface, exists := config["search_threshold"]; exists {
 			if iSearchThreshold, ok := searchThresholdInterface.(float64); ok {
 				searchThreshold = iSearchThreshold
+			}
+		}
+
+		if searchTopkInterface, exists := config["search_topk"]; exists {
+			if iSearchTopk, ok := searchTopkInterface.(int); ok {
+				searchTopk = iSearchTopk
 			}
 		}
 
@@ -121,6 +129,7 @@ func GetMem0ClientWithConfig(config map[string]interface{}) (*Mem0Client, error)
 			config:          mem0Cfg,
 			EnableSearch:    enableSearch,
 			SearchThreshold: searchThreshold,
+			SearchTopk:      searchTopk,
 		}
 
 		log.Log().Infof("Mem0 客户端初始化成功, host: %s", mem0Cfg.Host)
@@ -350,6 +359,7 @@ func (m *Mem0Client) Search(ctx context.Context, agentId string, query string, t
 	if !m.EnableSearch {
 		return "", nil
 	}
+	topK = m.SearchTopk
 	results, err := m.actionSearch(ctx, agentId, query, topK, m.SearchThreshold)
 	if err != nil {
 		return "", err

@@ -31,6 +31,7 @@ type MemobaseClient struct {
 	sync.RWMutex
 	EnableSearch    bool
 	SearchThreshold float64
+	SearchTopk      int
 }
 
 // Init 初始化Memobase客户端
@@ -118,6 +119,14 @@ func GetWithConfig(config map[string]interface{}) (*MemobaseClient, error) {
 			threshold, ok := thresholdInterface.(float64)
 			if ok {
 				clientInstance.SearchThreshold = threshold
+			}
+		}
+
+		topKInterface, ok := config["search_topk"]
+		if ok {
+			topK, ok := topKInterface.(int)
+			if ok {
+				clientInstance.SearchTopk = topK
 			}
 		}
 
@@ -242,6 +251,7 @@ func (m *MemobaseClient) Search(ctx context.Context, agentID string, query strin
 	if !m.EnableSearch {
 		return "", nil
 	}
+	topK = m.SearchTopk
 	// 将设备ID转换为UUID格式（Memobase要求）
 	memobaseUserID := deviceIDToUUID(agentID)
 
