@@ -682,7 +682,8 @@ func (s *ChatSession) processChatText(ctx context.Context) {
 			continue
 		}
 
-		err = s.actionDoChat(item.ctx, item.text)
+		//err = s.actionDoChat(item.ctx, item.text)
+		err = s.RunEinoGraph(item.ctx, item.text)
 		if err != nil {
 			log.Errorf("处理对话失败: %v", err)
 			continue
