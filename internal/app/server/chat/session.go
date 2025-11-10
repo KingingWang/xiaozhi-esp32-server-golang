@@ -299,8 +299,6 @@ func (s *ChatSession) HandleCommonHelloMessage(msg *ClientMessage) error {
 	clientState.InputAudioFormat = *msg.AudioParams
 	clientState.SetAsrPcmFrameSize(clientState.InputAudioFormat.SampleRate, clientState.InputAudioFormat.Channels, clientState.InputAudioFormat.FrameDuration)
 
-	s.asrManager.ProcessVadAudio(clientState.Ctx, s.Close)
-
 	return nil
 }
 
@@ -557,6 +555,13 @@ func (s *ChatSession) OnListenStart() error {
 		s.clientState.VoiceStatus.SetClientHaveVoice(true)
 	}
 
+	//在这里开始eino编排, todo
+
+	return nil
+}
+
+func (s *ChatSession) EinoAsrComponent(ctx context.Context, input *schema.StreamReader[[]float32]) (string, error) {
+
 	// 启动asr流式识别，复用 restartAsrRecognition 函数
 	err := s.asrManager.RestartAsrRecognition(ctx)
 	if err != nil {
@@ -566,93 +571,91 @@ func (s *ChatSession) OnListenStart() error {
 	}
 
 	// 启动一个goroutine处理asr结果
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Errorf("asr结果处理goroutine panic: %v, stack: %s", r, string(debug.Stack()))
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("asr结果处理goroutine panic: %v, stack: %s", r, string(debug.Stack()))
+		}
+	}()
+
+	//最大空闲 60s
+
+	var startIdleTime, maxIdleTime int64
+	startIdleTime = time.Now().Unix()
+	maxIdleTime = 60
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Debugf("asr ctx done")
+			return
+		default:
+		}
+
+		text, isRetry, err := s.clientState.RetireAsrResult(ctx)
+		if err != nil {
+			log.Errorf("处理asr结果失败: %v", err)
+			s.Close()
+			return
+		}
+		if !isRetry {
+			log.Debugf("asrResult is not retry, return")
+			return
+		}
+
+		//统计asr耗时
+		log.Debugf("处理asr结果: %s, 耗时: %d ms", text, s.clientState.GetAsrDuration())
+
+		if text != "" {
+			// 重置重试计数器
+			startIdleTime = 0
+
+			//当获取到asr结果时, 结束语音输入
+			s.clientState.OnVoiceSilence()
+
+			//发送asr消息
+			err = s.serverTransport.SendAsrResult(text)
+			if err != nil {
+				log.Errorf("发送asr消息失败: %v", err)
+				s.Close()
+				return
 			}
-		}()
 
-		//最大空闲 60s
-
-		var startIdleTime, maxIdleTime int64
-		startIdleTime = time.Now().Unix()
-		maxIdleTime = 60
-
-		for {
+			err = s.AddAsrResultToQueue(text)
+			if err != nil {
+				log.Errorf("开始对话失败: %v", err)
+				s.Close()
+				return
+			}
+			return
+		} else {
 			select {
 			case <-ctx.Done():
 				log.Debugf("asr ctx done")
 				return
 			default:
 			}
-
-			text, isRetry, err := s.clientState.RetireAsrResult(ctx)
-			if err != nil {
-				log.Errorf("处理asr结果失败: %v", err)
-				s.Close()
-				return
-			}
-			if !isRetry {
-				log.Debugf("asrResult is not retry, return")
-				return
-			}
-
-			//统计asr耗时
-			log.Debugf("处理asr结果: %s, 耗时: %d ms", text, s.clientState.GetAsrDuration())
-
-			if text != "" {
-				// 重置重试计数器
-				startIdleTime = 0
-
-				//当获取到asr结果时, 结束语音输入
-				s.clientState.OnVoiceSilence()
-
-				//发送asr消息
-				err = s.serverTransport.SendAsrResult(text)
-				if err != nil {
-					log.Errorf("发送asr消息失败: %v", err)
-					s.Close()
-					return
-				}
-
-				err = s.AddAsrResultToQueue(text)
-				if err != nil {
-					log.Errorf("开始对话失败: %v", err)
-					s.Close()
-					return
-				}
-				return
-			} else {
-				select {
-				case <-ctx.Done():
-					log.Debugf("asr ctx done")
-					return
-				default:
-				}
-				log.Debugf("ready Restart Asr, s.clientState.Status: %s", s.clientState.Status)
-				if s.clientState.Status == ClientStatusListening || s.clientState.Status == ClientStatusListenStop {
-					// text 为空，检查是否需要重新启动ASR
-					diffTs := time.Now().Unix() - startIdleTime
-					if startIdleTime > 0 && diffTs <= maxIdleTime {
-						log.Warnf("ASR识别结果为空，尝试重启ASR识别, diff ts: %s", diffTs)
-						if restartErr := s.asrManager.RestartAsrRecognition(ctx); restartErr != nil {
-							log.Errorf("重启ASR识别失败: %v", restartErr)
-							s.Close()
-							return
-						}
-						continue
-					} else {
-						log.Warnf("ASR识别结果为空，已达到最大空闲时间: %d", maxIdleTime)
+			log.Debugf("ready Restart Asr, s.clientState.Status: %s", s.clientState.Status)
+			if s.clientState.Status == ClientStatusListening || s.clientState.Status == ClientStatusListenStop {
+				// text 为空，检查是否需要重新启动ASR
+				diffTs := time.Now().Unix() - startIdleTime
+				if startIdleTime > 0 && diffTs <= maxIdleTime {
+					log.Warnf("ASR识别结果为空，尝试重启ASR识别, diff ts: %s", diffTs)
+					if restartErr := s.asrManager.RestartAsrRecognition(ctx); restartErr != nil {
+						log.Errorf("重启ASR识别失败: %v", restartErr)
 						s.Close()
 						return
 					}
+					continue
+				} else {
+					log.Warnf("ASR识别结果为空，已达到最大空闲时间: %d", maxIdleTime)
+					s.Close()
+					return
 				}
 			}
-			return
 		}
-	}()
-	return nil
+		return
+	}
+	return result, nil
 }
 
 // startChat 开始对话

@@ -119,8 +119,8 @@ func (s *ChatSession) RunEinoGraph(ctx context.Context, text string) error {
 		return err
 	}
 
-	// 创建 toolCallResult 节点（使用 StreamableLambda 适配 []*schema.Message 输入）
-	toolCallResultNode := compose.StreamableLambda(s.toolCallResultTransform)
+	// 创建 toolCallResult 节点
+	toolCallResultNode := compose.InvokableLambda(s.toolCallResultHandler)
 
 	// 添加节点到图
 	_ = graph.AddChatTemplateNode(eino.NodeChatTemplate, chatTemplateNode, compose.WithNodeName(eino.NodeChatTemplate))
@@ -186,6 +186,22 @@ func (s *ChatSession) RunEinoGraph(ctx context.Context, text string) error {
 	)
 	_ = graph.AddLambdaNode(eino.NodeToolCallResult, toolCallResultNode, compose.WithNodeName(eino.NodeToolCallResult))
 
+	_ = graph.AddPassthroughNode(eino.NodePassThrough1)
+	_ = graph.AddPassthroughNode(eino.NodePassThrough2)
+
+	// 创建分支节点（使用 NewGraphBranch 因为输入是非流式的 []*schema.Message）
+	// 注意：branch 节点会根据条件动态路由到目标节点（包括 compose.END）
+	// 因此不需要显式添加 Edge 到 compose.END，branch 会自动处理路由
+	afterToolCallBranch := compose.NewGraphBranch(s.afterToolCallBranchCondition, map[string]bool{
+		eino.NodeLLM: true,
+		compose.END:  true,
+	})
+
+	afterLlmSentenceBranch := compose.NewStreamGraphBranch(s.afterLlmSentenceBranchCondition, map[string]bool{
+		eino.NodeToolCall:     true,
+		eino.NodePassThrough1: true,
+	})
+
 	// 构建边关系
 	_ = graph.AddEdge(compose.START, eino.NodeChatTemplate)
 	// prompt template(输入非流式, 输出非流式) => llm
@@ -202,15 +218,12 @@ func (s *ChatSession) RunEinoGraph(ctx context.Context, text string) error {
 	_ = graph.AddEdge(eino.NodeLLMSentence, eino.NodeToolCall)
 	_ = graph.AddEdge(eino.NodeToolCall, eino.NodeToolCallResult)
 
-	// 创建分支节点（使用 NewGraphBranch 因为输入是非流式的 []*schema.Message）
-	// 注意：branch 节点会根据条件动态路由到目标节点（包括 compose.END）
-	// 因此不需要显式添加 Edge 到 compose.END，branch 会自动处理路由
-	branch := compose.NewGraphBranch(s.branchCondition, map[string]bool{
-		eino.NodeLLM: true,
-		compose.END:  true,
-	})
+	_ = graph.AddEdge(eino.NodePassThrough1, eino.NodePassThrough2)
+	_ = graph.AddEdge(eino.NodePassThrough2, compose.END)
+
 	// merge 节点接收来自 TTS2Client 和 ToolCallResult 的输出，然后连接到 Branch
-	_ = graph.AddBranch(eino.NodeToolCallResult, branch)
+	_ = graph.AddBranch(eino.NodeToolCallResult, afterToolCallBranch)
+	_ = graph.AddBranch(eino.NodeLLMSentence, afterLlmSentenceBranch)
 
 	// 编译图
 	r, err := graph.Compile(ctx)
@@ -266,93 +279,74 @@ func (s *ChatSession) newChatTemplate(ctx context.Context) prompt.ChatTemplate {
 // toolCallResultTransform 处理工具调用结果，将工具调用结果转换为消息
 // 输入：[]*schema.Message（来自 ToolsNode 的输出）
 // 输出：*schema.StreamReader[*schema.Message]（流式消息）
-func (s *ChatSession) toolCallResultTransform(ctx context.Context, input []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
-	// 创建一个新的 StreamReader 用于输出处理后的消息
-	outputReader, outputWriter := schema.Pipe[*schema.Message](100)
+func (s *ChatSession) toolCallResultHandler(ctx context.Context, input []*schema.Message) ([]*schema.Message, error) {
+	var messages []*schema.Message
 
-	go func() {
-		defer outputWriter.Close()
+	// 获取工具列表，用于通过 ToolCallID 查找工具信息
+	mcpTools, err := mcp.GetToolsByDeviceId(s.clientState.DeviceID, s.clientState.AgentID)
+	if err != nil {
+		log.Errorf("获取设备 %s 的工具失败: %v", s.clientState.DeviceID, err)
+		mcpTools = make(map[string]tool.InvokableTool)
+	}
 
-		// 获取工具列表，用于通过 ToolCallID 查找工具信息
-		mcpTools, err := mcp.GetToolsByDeviceId(s.clientState.DeviceID, s.clientState.AgentID)
-		if err != nil {
-			log.Errorf("获取设备 %s 的工具失败: %v", s.clientState.DeviceID, err)
-			mcpTools = make(map[string]tool.InvokableTool)
+	// 用于存储工具调用历史，以便通过 ToolCallID 查找对应的工具调用
+	toolCallMap := make(map[string]*schema.ToolCall)
+
+	// 遍历输入消息列表
+	for _, msg := range input {
+		if msg == nil {
+			continue
 		}
 
-		// 用于存储工具调用历史，以便通过 ToolCallID 查找对应的工具调用
-		toolCallMap := make(map[string]*schema.ToolCall)
-
-		// 遍历输入消息列表
-		for _, msg := range input {
-			if msg == nil {
+		// 如果是工具结果消息（Role == schema.Tool），处理工具调用结果
+		if msg.Role == schema.Tool && msg.ToolCallID != "" {
+			// 查找对应的工具调用
+			toolCall, ok := toolCallMap[msg.ToolCallID]
+			if !ok {
+				log.Warnf("未找到 ToolCallID %s 对应的工具调用", msg.ToolCallID)
 				continue
 			}
 
-			// 如果是工具调用消息（包含 ToolCalls），保存工具调用信息
-			if msg.ToolCalls != nil && len(msg.ToolCalls) > 0 {
-				for _, tc := range msg.ToolCalls {
-					toolCallMap[tc.ID] = &tc
-				}
-				// 透传工具调用消息
-				outputWriter.Send(msg, nil)
+			// 获取工具对象
+			toolName := toolCall.Function.Name
+			toolObj, ok := mcpTools[toolName]
+			if !ok || toolObj == nil {
+				log.Warnf("未找到工具: %s", toolName)
 				continue
 			}
 
-			// 如果是工具结果消息（Role == schema.Tool），处理工具调用结果
-			if msg.Role == schema.Tool && msg.ToolCallID != "" {
-				// 查找对应的工具调用
-				toolCall, ok := toolCallMap[msg.ToolCallID]
-				if !ok {
-					log.Warnf("未找到 ToolCallID %s 对应的工具调用", msg.ToolCallID)
-					// 即使找不到工具调用，也透传消息
-					outputWriter.Send(msg, nil)
-					continue
-				}
+			// 处理工具调用结果
+			var wg sync.WaitGroup
+			processedResult, shouldStop := s.llmManager.processToolCallResult(ctx, toolName, msg.Content, toolObj, &wg)
 
-				// 获取工具对象
-				toolName := toolCall.Function.Name
-				toolObj, ok := mcpTools[toolName]
-				if !ok || toolObj == nil {
-					log.Warnf("未找到工具: %s", toolName)
-					// 即使找不到工具，也透传消息
-					outputWriter.Send(msg, nil)
-					continue
-				}
-
-				// 处理工具调用结果
-				var wg sync.WaitGroup
-				processedResult, shouldStop := s.llmManager.processToolCallResult(ctx, toolName, msg.Content, toolObj, &wg)
-
-				// 创建处理后的消息
-				processedMsg := &schema.Message{
-					Role:       schema.Tool,
-					ToolCallID: msg.ToolCallID,
-					Content:    processedResult,
-				}
-
-				// 等待异步处理完成（如音频播放）
-				wg.Wait()
-
-				// 如果应该停止处理，在消息 Content 中添加特殊标记
-				// 这样 branchCondition 可以识别并直接结束流程
-				if shouldStop {
-					// 在 Content 前面添加特殊标记，标识这是一个需要停止后续处理的消息
-					// 使用特殊前缀来标记，branchCondition 会检查这个标记
-					processedMsg.Content = "[STOP]" + processedMsg.Content
-					log.Debugf("工具 %s 的执行结果需要停止后续处理，已标记消息", toolName)
-				}
-
-				// 发送处理后的消息
-				outputWriter.Send(processedMsg, nil)
-			} else {
-				// 其他消息直接透传
-				outputWriter.Send(msg, nil)
+			// 创建处理后的消息
+			processedMsg := &schema.Message{
+				Role:       schema.Tool,
+				ToolCallID: msg.ToolCallID,
+				Content:    processedResult,
 			}
-		}
-	}()
 
-	return outputReader, nil
+			// 等待异步处理完成（如音频播放）
+			wg.Wait()
+
+			// 如果应该停止处理，在消息 Content 中添加特殊标记
+			// 这样 branchCondition 可以识别并直接结束流程
+			if shouldStop {
+				// 在 Content 前面添加特殊标记，标识这是一个需要停止后续处理的消息
+				// 使用特殊前缀来标记，branchCondition 会检查这个标记
+				processedMsg.Content = "[STOP]" + processedMsg.Content
+				log.Debugf("工具 %s 的执行结果需要停止后续处理，已标记消息", toolName)
+			}
+
+			// 发送处理后的消息
+			messages = append(messages, processedMsg)
+		} else {
+			// 其他消息直接透传
+			messages = append(messages, msg)
+		}
+	}
+
+	return messages, nil
 }
 
 // mergeCollect 合并 llmsentence 和 tool_call 的输出
@@ -388,10 +382,10 @@ func (s *ChatSession) mergeTransform(ctx context.Context, input *schema.StreamRe
 	return messages, nil
 }
 
-// branchCondition 判断是否有工具调用或工具结果，决定返回到 llm 节点还是结束
-// 输入：[]*schema.Message（来自 merge 节点的非流式输出）
+// afterLlmSentenceBranchCondition 判断是否有工具调用，决定 passthrough 节点还是结束
+// 输入：streamReader[*schema.Message]
 // 输出：目标节点名称（string）
-func (s *ChatSession) branchCondition(ctx context.Context, input []*schema.Message) (string, error) {
+func (s *ChatSession) afterToolCallBranchCondition(ctx context.Context, input []*schema.Message) (string, error) {
 	// 一次遍历完成所有判断
 	hasToolCall := false
 	hasToolResult := false
@@ -433,10 +427,10 @@ func (s *ChatSession) branchCondition(ctx context.Context, input []*schema.Messa
 	return compose.END, nil
 }
 
-// toolCallBranchCondition 判断是否有工具调用，决定路由到 tool_call 还是 tool_call_result
+// afterLlmSentenceBranchCondition 判断是否有工具调用，决定路由到 tool_call 还是 tool_call_result
 // 输入：*schema.StreamReader[*schema.Message]（来自 llm_sentence 的流式消息）
 // 输出：目标节点名称（string）
-func (s *ChatSession) toolCallBranchCondition(ctx context.Context, input *schema.StreamReader[*schema.Message]) (string, error) {
+func (s *ChatSession) afterLlmSentenceBranchCondition(ctx context.Context, input *schema.StreamReader[*schema.Message]) (string, error) {
 	// 收集所有消息，查找是否有工具调用
 	var hasToolCall bool
 	for {
@@ -465,7 +459,7 @@ func (s *ChatSession) toolCallBranchCondition(ctx context.Context, input *schema
 
 	// 没有工具调用，直接路由到 Merge（跳过 tool_call 和 tool_call_result）
 	log.Debugf("没有工具调用，直接路由到 Merge")
-	return eino.NodeMerge, nil
+	return eino.NodePassThrough1, nil
 }
 
 // createTtsTransform 创建 TTS 转换函数
