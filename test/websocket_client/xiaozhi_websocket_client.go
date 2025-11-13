@@ -543,7 +543,7 @@ func sendTextToSpeech(conn *websocket.Conn, deviceID string) error {
 		}
 
 		for audioData := range audioChan {
-			fmt.Printf("发送语音数据长度: %d\n", len(audioData))
+			//fmt.Printf("发送语音数据长度: %d\n", len(audioData))
 			conn.WriteMessage(websocket.BinaryMessage, audioData)
 			time.Sleep(time.Duration(FrameDurationMs) * time.Millisecond)
 		}
@@ -565,6 +565,24 @@ func sendTextToSpeech(conn *websocket.Conn, deviceID string) error {
 	// 新增：等待用户输入文本
 	reader := bufio.NewReader(os.Stdin)
 
+	var stopEmptyOpusChan = make(chan struct{})
+	var resumeChan = make(chan struct{})
+	go func() {
+		if mode == "realtime" {
+			//持续发送emptyOpusData, 直到收到 停止信号
+			for {
+				select {
+				case <-stopEmptyOpusChan:
+					resumeChan <- struct{}{}
+					<-resumeChan
+				default:
+					conn.WriteMessage(websocket.BinaryMessage, emptyOpusData)
+					time.Sleep(time.Duration(FrameDurationMs) * time.Millisecond)
+				}
+			}
+		}
+	}()
+
 	for {
 
 		fmt.Print("请输入要合成的文本（回车发送，直接回车退出）：")
@@ -584,16 +602,27 @@ func sendTextToSpeech(conn *websocket.Conn, deviceID string) error {
 			}
 			continue
 		}
+		f := func() {
+			if mode == "realtime" {
+				stopEmptyOpusChan <- struct{}{}
+				<-resumeChan
+			}
+			sendListenStart(conn, deviceID, mode)
+			genAndSendAudio(input, 100)
+			if mode == "manual" {
+				sendListenStop(conn, deviceID)
+			}
+			if mode == "realtime" {
+				resumeChan <- struct{}{}
+			}
+		}
+		if mode == "realtime" {
+			go f()
+			continue
+		}
 		select {
 		case <-waitInput:
-
-			go func() {
-				sendListenStart(conn, deviceID, mode)
-				genAndSendAudio(input, 100)
-				if mode != "auto" {
-					sendListenStop(conn, deviceID)
-				}
-			}()
+			go f()
 		}
 	}
 

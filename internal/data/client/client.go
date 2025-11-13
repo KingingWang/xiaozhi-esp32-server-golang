@@ -72,6 +72,9 @@ type ClientState struct {
 	Ctx    context.Context
 	Cancel context.CancelFunc
 
+	SessionCtx         Ctx //一次对话的上下文
+	AfterAsrSessionCtx Ctx //asr后流程的上下文
+
 	//prompt, 系统提示词
 	SystemPrompt string
 
@@ -85,7 +88,6 @@ type ClientState struct {
 	AsrAudioBuffer *AsrAudioBuffer
 
 	VoiceStatus
-	SessionCtx Ctx
 
 	UdpSendAudioData SendAudioData //发送音频数据
 	Statistic        Statistic     //耗时统计
@@ -96,6 +98,10 @@ type ClientState struct {
 
 	IsTtsStart        bool //是否tts开始
 	IsWelcomeSpeaking bool //是否已经欢迎语
+}
+
+func (c *ClientState) IsRealTime() bool {
+	return c.ListenMode == "realtime"
 }
 
 func (c *ClientState) GetDeviceIDOrAgentID() string {
@@ -251,36 +257,37 @@ func (c *ClientState) GetStatus() string {
 	return c.Status
 }
 
-func (s *ClientState) ResetSessionCtx() {
-	s.SessionCtx.Lock()
-	defer s.SessionCtx.Unlock()
-	if s.SessionCtx.Ctx == nil {
-		s.SessionCtx.Ctx, s.SessionCtx.Cancel = context.WithCancel(s.Ctx)
-	}
-}
-
-func (s *ClientState) CancelSessionCtx() {
-	s.SessionCtx.Lock()
-	defer s.SessionCtx.Unlock()
-	if s.SessionCtx.Ctx != nil {
-		s.SessionCtx.Cancel()
-		s.SessionCtx.Ctx = nil
-	}
-}
-
-func (s *ClientState) GetSessionCtx() context.Context {
-	s.SessionCtx.Lock()
-	defer s.SessionCtx.Unlock()
-	if s.SessionCtx.Ctx == nil {
-		s.SessionCtx.Ctx, s.SessionCtx.Cancel = context.WithCancel(s.Ctx)
-	}
-	return s.SessionCtx.Ctx
-}
-
 type Ctx struct {
 	sync.RWMutex
-	Ctx    context.Context
-	Cancel context.CancelFunc
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func (c *Ctx) Reset() {
+	c.Lock()
+	defer c.Unlock()
+	if c.ctx != nil {
+		c.cancel()
+		c.ctx = nil
+	}
+}
+
+func (c *Ctx) Get(parentCtx context.Context) context.Context {
+	c.Lock()
+	defer c.Unlock()
+	if c.ctx == nil {
+		c.ctx, c.cancel = context.WithCancel(parentCtx)
+	}
+	return c.ctx
+}
+
+func (c *Ctx) Cancel() {
+	c.Lock()
+	defer c.Unlock()
+	if c.ctx != nil {
+		c.cancel()
+		c.ctx = nil
+	}
 }
 
 func (s *ClientState) getLLMProvider() (llm_types.LLMProvider, error) {
@@ -350,7 +357,9 @@ func (c *ClientState) Destroy() {
 	c.VoiceStatus.Reset()
 	c.AsrAudioBuffer.ClearAsrAudioData()
 
-	c.ResetSessionCtx()
+	c.SessionCtx.Reset()
+	c.AfterAsrSessionCtx.Reset()
+
 	c.Statistic.Reset()
 	c.SetStatus(ClientStatusInit)
 	c.SetTtsStart(false)

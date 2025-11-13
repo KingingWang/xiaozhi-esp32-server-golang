@@ -184,7 +184,7 @@ func (c *ChatSession) AudioMessageLoop(ctx context.Context) {
 			}
 		}
 		if c.clientState.GetClientVoiceStop() {
-			//log.Debug("客户端停止说话, 跳过音频数据")
+			log.Debug("客户端停止说话, 跳过音频数据")
 			continue
 		}
 
@@ -363,6 +363,7 @@ func (s *ChatSession) HandleListenDetect(msg *ClientMessage) error {
 					s.HandleWelcome()
 				}
 			} else {
+				s.clientState.Destroy()
 				//进行llm->tts聊天
 				if err := s.AddAsrResultToQueue(text); err != nil {
 					log.Errorf("开始对话失败: %v", err)
@@ -391,7 +392,8 @@ func (s *ChatSession) HandleNotActivated() {
 	s.serverTransport.SendTtsStart()
 	defer s.serverTransport.SendTtsStop()
 
-	s.ttsManager.handleTts(s.clientState.GetSessionCtx(), llm_common.LLMResponseStruct{
+	sessionCtx := s.clientState.SessionCtx.Get(s.clientState.Ctx)
+	s.ttsManager.handleTts(s.clientState.AfterAsrSessionCtx.Get(sessionCtx), llm_common.LLMResponseStruct{
 		Text: fmt.Sprintf("请在后台添加设备，激活码: %d", code),
 	})
 
@@ -402,7 +404,8 @@ func (s *ChatSession) HandleWelcome() {
 	s.serverTransport.SendTtsStart()
 	defer s.serverTransport.SendTtsStop()
 
-	s.ttsManager.handleTts(s.clientState.GetSessionCtx(), llm_common.LLMResponseStruct{
+	sessionCtx := s.clientState.SessionCtx.Get(s.clientState.Ctx)
+	s.ttsManager.handleTts(s.clientState.AfterAsrSessionCtx.Get(sessionCtx), llm_common.LLMResponseStruct{
 		Text: greetingText,
 	})
 
@@ -548,7 +551,7 @@ func (s *ChatSession) OnListenStart() error {
 
 	s.clientState.Destroy()
 
-	ctx := s.clientState.GetSessionCtx()
+	ctx := s.clientState.SessionCtx.Get(s.clientState.Ctx)
 
 	//初始化asr相关
 	if s.clientState.ListenMode == "manual" {
@@ -606,6 +609,10 @@ func (s *ChatSession) EinoAsrComponent(ctx context.Context, input *schema.Stream
 		log.Debugf("处理asr结果: %s, 耗时: %d ms", text, s.clientState.GetAsrDuration())
 
 		if text != "" {
+			//如果是realtime模式下，需要停止 当前的llm和tts
+			if s.clientState.IsRealTime() {
+				s.clientState.AfterAsrSessionCtx.Cancel()
+			}
 			// 重置重试计数器
 			startIdleTime = 0
 
@@ -625,6 +632,15 @@ func (s *ChatSession) EinoAsrComponent(ctx context.Context, input *schema.Stream
 				log.Errorf("开始对话失败: %v", err)
 				s.Close()
 				return
+			}
+			if s.clientState.IsRealTime() {
+				if restartErr := s.asrManager.RestartAsrRecognition(ctx); restartErr != nil {
+					log.Errorf("重启ASR识别失败: %v", restartErr)
+					s.Close()
+					return
+				}
+				//realtime模式下, 继续重启asr识别
+				continue
 			}
 			return
 		} else {
@@ -661,8 +677,9 @@ func (s *ChatSession) EinoAsrComponent(ctx context.Context, input *schema.Stream
 // startChat 开始对话
 func (s *ChatSession) AddAsrResultToQueue(text string) error {
 	log.Debugf("AddAsrResultToQueue text: %s", text)
+	sessionCtx := s.clientState.SessionCtx.Get(s.clientState.Ctx)
 	item := AsrResponseChannelItem{
-		ctx:  s.clientState.GetSessionCtx(),
+		ctx:  s.clientState.AfterAsrSessionCtx.Get(sessionCtx),
 		text: text,
 	}
 	err := s.chatTextQueue.Push(item)

@@ -137,12 +137,13 @@ func (m *MemobaseClient) AddMessage(ctx context.Context, agentID string, msg sch
 
 	// 如果有工具调用，添加到消息中
 	if len(msg.ToolCalls) > 0 {
-		for _, toolCall := range msg.ToolCalls {
+		return nil
+		/*for _, toolCall := range msg.ToolCalls {
 			messages = append(messages, blob.OpenAICompatibleMessage{
 				Role:    "tool",
 				Content: fmt.Sprintf("Tool: %s, Args: %v", toolCall.Function.Name, toolCall.Function.Arguments),
 			})
-		}
+		}*/
 	}
 
 	// 创建ChatBlob

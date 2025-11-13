@@ -22,6 +22,7 @@ type DeviceMcpSession struct {
 	cancel        context.CancelFunc
 	wsEndPointMcp sync.Map
 	iotOverMcp    *McpClientInstance
+	iotMux        sync.RWMutex
 }
 
 func (dcs *DeviceMcpSession) AddWsEndPointMcp(mcpClient *McpClientInstance) {
@@ -35,6 +36,12 @@ func (dcs *DeviceMcpSession) AddWsEndPointMcp(mcpClient *McpClientInstance) {
 
 // todo
 func (dcs *DeviceMcpSession) SetIotOverMcp(mcpClient *McpClientInstance) {
+	dcs.iotMux.Lock()
+	defer dcs.iotMux.Unlock()
+	// 如果已经存在一个iotOverMcp，先关闭它
+	/*if dcs.iotOverMcp != nil {
+		dcs.iotOverMcp.Close()
+	}*/
 	dcs.iotOverMcp = mcpClient
 
 	// 设置关闭回调
@@ -91,6 +98,7 @@ func NewDeviceMCPSession(deviceID string) *DeviceMcpSession {
 		deviceID: deviceID,
 		Ctx:      ctx,
 		cancel:   cancel,
+		iotMux:   sync.RWMutex{},
 		// wsEndPointMcp: make(map[string]*McpClientInstance),
 	}
 
@@ -342,6 +350,7 @@ func (dc *DeviceMcpSession) GetTools() map[string]tool.InvokableTool {
 		return true
 	})
 
+	dc.iotMux.RLock()
 	if dc.iotOverMcp != nil {
 		dc.iotOverMcp.toolsMux.RLock()
 		for k, v := range dc.iotOverMcp.tools {
@@ -349,6 +358,7 @@ func (dc *DeviceMcpSession) GetTools() map[string]tool.InvokableTool {
 		}
 		dc.iotOverMcp.toolsMux.RUnlock()
 	}
+	dc.iotMux.RUnlock()
 	return tools
 }
 

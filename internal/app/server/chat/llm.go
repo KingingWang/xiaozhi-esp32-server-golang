@@ -103,7 +103,10 @@ func (l *LLMManager) AddTextToTTSQueue(text string) error {
 		Text:    text,
 	}
 	close(llmResponseChan)
-	l.HandleLLMResponseChannelAsync(l.clientState.GetSessionCtx(), msg, llmResponseChan)
+
+	sessionCtx := l.clientState.SessionCtx.Get(l.clientState.Ctx)
+	ctx := l.clientState.AfterAsrSessionCtx.Get(sessionCtx)
+	l.HandleLLMResponseChannelAsync(ctx, msg, llmResponseChan)
 
 	return nil
 }

@@ -126,6 +126,10 @@ func (a *ASRManager) ProcessVadAudio(
 					}
 					//首次触发识别到语音时,为了语音数据完整性 将vadPcmData赋值给pcmData, 之后的音频数据全部进入asr
 					if haveVoice && !clientHaveVoice {
+						if state.IsRealTime() {
+							//realtime模式下, 如果此时有正在进行的llm和tts则取消掉
+							state.AfterAsrSessionCtx.Cancel()
+						}
 						//首次获取全部pcm数据送入asr
 						pcmData = state.AsrAudioBuffer.GetAndClearAllData()
 					}
