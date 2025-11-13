@@ -82,7 +82,8 @@ type ClientState struct {
 	OutputAudioFormat AudioFormat //输出音频格式
 
 	// opus接收的音频数据缓冲区
-	OpusAudioBuffer chan []byte
+	OpusAudioBufferWriter *schema.StreamWriter[[]byte]
+	OpusAudioBufferReader *schema.StreamReader[[]byte]
 
 	// pcm接收的音频数据缓冲区
 	AsrAudioBuffer *AsrAudioBuffer

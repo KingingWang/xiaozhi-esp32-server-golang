@@ -17,6 +17,7 @@ import (
 	types_conn "xiaozhi-esp32-server-golang/internal/app/server/types"
 	. "xiaozhi-esp32-server-golang/internal/data/client"
 	. "xiaozhi-esp32-server-golang/internal/data/msg"
+	vad_types "xiaozhi-esp32-server-golang/internal/data/vad"
 	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
 	"xiaozhi-esp32-server-golang/internal/domain/eventbus"
 	"xiaozhi-esp32-server-golang/internal/domain/llm"
@@ -224,13 +225,12 @@ func (c *ChatSession) HandleTextMessage(message []byte) error {
 
 // HandleAudioMessage 处理音频消息
 func (c *ChatSession) HandleAudioMessage(data []byte) bool {
-	select {
-	case c.clientState.OpusAudioBuffer <- data:
-		return true
-	default:
-		log.Warnf("音频缓冲区已满, 丢弃音频数据")
+	closed := c.clientState.OpusAudioBufferWriter.Send(data, nil)
+	if closed {
+		log.Errorf("opus audio buffer writer is closed, drop audio data")
+		return false
 	}
-	return false
+	return true
 }
 
 // handleHelloMessage 处理 hello 消息
@@ -298,6 +298,9 @@ func (s *ChatSession) HandleCommonHelloMessage(msg *ClientMessage) error {
 
 	clientState.InputAudioFormat = *msg.AudioParams
 	clientState.SetAsrPcmFrameSize(clientState.InputAudioFormat.SampleRate, clientState.InputAudioFormat.Channels, clientState.InputAudioFormat.FrameDuration)
+
+	//start vad audio process
+	s.asrManager.ProcessVadAudio(s.ctx, s.clientState.OpusAudioBufferReader, vad_types.WithOnClose(s.Close))
 
 	return nil
 }
@@ -570,7 +573,7 @@ func (s *ChatSession) EinoAsrComponent(ctx context.Context, input *schema.Stream
 	if err != nil {
 		log.Errorf("asr流式识别失败: %v", err)
 		s.Close()
-		return err
+		return "", err
 	}
 
 	// 启动一个goroutine处理asr结果
@@ -581,7 +584,6 @@ func (s *ChatSession) EinoAsrComponent(ctx context.Context, input *schema.Stream
 	}()
 
 	//最大空闲 60s
-
 	var startIdleTime, maxIdleTime int64
 	startIdleTime = time.Now().Unix()
 	maxIdleTime = 60
@@ -590,7 +592,7 @@ func (s *ChatSession) EinoAsrComponent(ctx context.Context, input *schema.Stream
 		select {
 		case <-ctx.Done():
 			log.Debugf("asr ctx done")
-			return
+			return "", nil
 		default:
 		}
 
@@ -598,11 +600,11 @@ func (s *ChatSession) EinoAsrComponent(ctx context.Context, input *schema.Stream
 		if err != nil {
 			log.Errorf("处理asr结果失败: %v", err)
 			s.Close()
-			return
+			return "", err
 		}
 		if !isRetry {
 			log.Debugf("asrResult is not retry, return")
-			return
+			return "", nil
 		}
 
 		//统计asr耗时
@@ -620,12 +622,13 @@ func (s *ChatSession) EinoAsrComponent(ctx context.Context, input *schema.Stream
 			s.clientState.OnVoiceSilence()
 
 			//发送asr消息
-			err = s.serverTransport.SendAsrResult(text)
+			/*err = s.serverTransport.SendAsrResult(text)
 			if err != nil {
 				log.Errorf("发送asr消息失败: %v", err)
 				s.Close()
-				return
+				return "", err
 			}
+
 
 			err = s.AddAsrResultToQueue(text)
 			if err != nil {
@@ -642,12 +645,14 @@ func (s *ChatSession) EinoAsrComponent(ctx context.Context, input *schema.Stream
 				//realtime模式下, 继续重启asr识别
 				continue
 			}
-			return
+			return "", err
+			}*/
+			return text, nil
 		} else {
 			select {
 			case <-ctx.Done():
 				log.Debugf("asr ctx done")
-				return
+				return "", nil
 			default:
 			}
 			log.Debugf("ready Restart Asr, s.clientState.Status: %s", s.clientState.Status)
@@ -659,19 +664,18 @@ func (s *ChatSession) EinoAsrComponent(ctx context.Context, input *schema.Stream
 					if restartErr := s.asrManager.RestartAsrRecognition(ctx); restartErr != nil {
 						log.Errorf("重启ASR识别失败: %v", restartErr)
 						s.Close()
-						return
+						return "", restartErr
 					}
 					continue
 				} else {
 					log.Warnf("ASR识别结果为空，已达到最大空闲时间: %d", maxIdleTime)
 					s.Close()
-					return
+					return "", nil
 				}
 			}
 		}
-		return
+		return "", nil
 	}
-	return result, nil
 }
 
 // startChat 开始对话
