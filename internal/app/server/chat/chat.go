@@ -43,8 +43,7 @@ func NewChatManager(deviceID string, transport types_conn.IConn, options ...Chat
 
 	cm.ctx, cm.cancel = context.WithCancel(ctx)
 
-	cm.transport.OnClose(cm.OnClose)
-
+	// 先创建 clientState，再注册 OnClose 回调，避免竞态条件
 	clientState, err := GenClientState(cm.ctx, cm.DeviceID)
 	if err != nil {
 		log.Errorf("初始化客户端状态失败: %v", err)
@@ -52,6 +51,9 @@ func NewChatManager(deviceID string, transport types_conn.IConn, options ...Chat
 		return nil, err
 	}
 	cm.clientState = clientState
+
+	// clientState 创建完成后再注册 OnClose 回调
+	cm.transport.OnClose(cm.OnClose)
 
 	serverTransport := NewServerTransport(cm.transport, clientState)
 
@@ -165,7 +167,9 @@ func (c *ChatManager) Close() error {
 func (c *ChatManager) OnClose(deviceId string) {
 	log.Infof("设备 %s 断开连接", deviceId)
 	c.cancel()
-	eventbus.Get().Publish(eventbus.TopicSessionEnd, c.clientState)
+	if c.clientState != nil {
+		eventbus.Get().Publish(eventbus.TopicSessionEnd, c.clientState)
+	}
 	return
 }
 

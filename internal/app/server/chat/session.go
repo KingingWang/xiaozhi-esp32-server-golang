@@ -714,7 +714,11 @@ func (s *ChatSession) ClearChatTextQueue() {
 }
 
 func (s *ChatSession) Close() {
-	log.Debugf("ChatSession.Close() 开始清理会话资源, 设备 %s", s.clientState.DeviceID)
+	deviceID := ""
+	if s.clientState != nil {
+		deviceID = s.clientState.DeviceID
+	}
+	log.Debugf("ChatSession.Close() 开始清理会话资源, 设备 %s", deviceID)
 
 	// 停止说话和清理音频相关资源
 	s.StopSpeaking(true)
@@ -730,9 +734,11 @@ func (s *ChatSession) Close() {
 	// 取消会话级别的上下文
 	s.cancel()
 
-	eventbus.Get().Publish(eventbus.TopicSessionEnd, s.clientState)
+	if s.clientState != nil {
+		eventbus.Get().Publish(eventbus.TopicSessionEnd, s.clientState)
+	}
 
-	log.Debugf("ChatSession.Close() 会话资源清理完成, 设备 %s", s.clientState.DeviceID)
+	log.Debugf("ChatSession.Close() 会话资源清理完成, 设备 %s", deviceID)
 }
 
 func (s *ChatSession) actionDoChat(ctx context.Context, text string) error {

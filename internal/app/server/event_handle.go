@@ -73,6 +73,10 @@ func (s *EventHandle) HandleSessionEnd() error {
 	}
 	workPool := workpool.NewWorkPool(10, 1000, workpool.JobHandler(f))
 	eventbus.Get().Subscribe(eventbus.TopicSessionEnd, func(clientState *ClientState) {
+		if clientState == nil {
+			log.Warnf("HandleSessionEnd: clientState is nil, skipping")
+			return
+		}
 		if clientState.MemoryProvider == nil {
 			return
 		}
