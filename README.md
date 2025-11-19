@@ -34,7 +34,7 @@ xiaozhi-esp32-server-golang 是一款高性能、全流式的 AI 后端服务，
 ## 🚀 快速开始 | Quick Start
 
 1. **Docker 一键部署**  
-   [查看 Docker-Composer 带控制台 快速开始文档 »](doc/docker_compose.md)
+   [查看 Docker-Composer 带控制台 快速开始文档 »](doc/docker_compose.md)  
    [查看 Docker 快速开始文档(无控制台) »](doc/docker.md)
 2. **本地编译与运行（优化版）**
 
