@@ -74,6 +74,7 @@
             <el-option label="Edge TTS" value="edge" />
             <el-option label="Edge 离线" value="edge_offline" />
             <el-option label="小智 TTS" value="xiaozhi" />
+            <el-option label="Microsoft TTS" value="microsoft" />
           </el-select>
         </el-form-item>
         
@@ -213,6 +214,25 @@
             <el-input v-model="form.xiaozhi.token" placeholder="请输入令牌" type="password" show-password />
           </el-form-item>
         </template>
+
+        <!-- Microsoft TTS 配置 -->
+        <template v-if="form.provider === 'microsoft'">
+          <el-form-item label="订阅密钥" prop="microsoft.subscription_key">
+            <el-input v-model="form.microsoft.subscription_key" placeholder="请输入Azure订阅密钥" type="password" show-password />
+          </el-form-item>
+          <el-form-item label="服务区域" prop="microsoft.region">
+            <el-input v-model="form.microsoft.region" placeholder="请输入服务区域（如：eastasia, koreacentral）" />
+          </el-form-item>
+          <el-form-item label="语音名称" prop="microsoft.voice">
+            <el-input v-model="form.microsoft.voice" placeholder="请输入语音名称（如：zh-CN-XiaoxiaoNeural）" />
+          </el-form-item>
+          <el-form-item label="语言代码" prop="microsoft.language">
+            <el-input v-model="form.microsoft.language" placeholder="请输入语言代码（如：zh-CN）" />
+          </el-form-item>
+          <el-form-item label="超时时间（秒）" prop="microsoft.timeout">
+            <el-input-number v-model="form.microsoft.timeout" :min="1" :max="300" style="width: 100%" />
+          </el-form-item>
+        </template>
       </el-form>
       
       <template #footer>
@@ -288,6 +308,13 @@ const form = reactive({
     device_id: 'ba:8f:17:de:94:94',
     client_id: 'e4b0c442-98fc-4e1b-8c3d-6a5b6a5b6a6d',
     token: 'test-token'
+  },
+  microsoft: {
+    subscription_key: '',
+    region: 'eastasia',
+    voice: 'zh-CN-XiaoxiaoNeural',
+    language: 'zh-CN',
+    timeout: 60
   }
 })
 
@@ -340,6 +367,13 @@ const generateConfig = () => {
       config.client_id = form.xiaozhi.client_id
       config.token = form.xiaozhi.token
       break
+    case 'microsoft':
+      config.subscription_key = form.microsoft.subscription_key
+      config.region = form.microsoft.region
+      config.voice = form.microsoft.voice
+      config.language = form.microsoft.language
+      config.timeout = form.microsoft.timeout
+      break
   }
   
   return JSON.stringify(config)
@@ -374,7 +408,12 @@ const rules = {
   'xiaozhi.server_addr': [{ required: true, message: '请输入服务器地址', trigger: 'blur' }],
   'xiaozhi.device_id': [{ required: true, message: '请输入设备ID', trigger: 'blur' }],
   'xiaozhi.client_id': [{ required: true, message: '请输入客户端ID', trigger: 'blur' }],
-  'xiaozhi.token': [{ required: true, message: '请输入令牌', trigger: 'blur' }]
+  'xiaozhi.token': [{ required: true, message: '请输入令牌', trigger: 'blur' }],
+  // Microsoft TTS 验证规则
+  'microsoft.subscription_key': [{ required: true, message: '请输入订阅密钥', trigger: 'blur' }],
+  'microsoft.region': [{ required: true, message: '请输入服务区域', trigger: 'blur' }],
+  'microsoft.voice': [{ required: true, message: '请输入语音名称', trigger: 'blur' }],
+  'microsoft.language': [{ required: true, message: '请输入语言代码', trigger: 'blur' }]
 }
 
 const loadConfigs = async () => {
@@ -446,6 +485,13 @@ const editConfig = (config) => {
         form.xiaozhi.device_id = configData.device_id || ''
         form.xiaozhi.client_id = configData.client_id || ''
         form.xiaozhi.token = configData.token || ''
+        break
+      case 'microsoft':
+        form.microsoft.subscription_key = configData.subscription_key || ''
+        form.microsoft.region = configData.region || 'eastasia'
+        form.microsoft.voice = configData.voice || 'zh-CN-XiaoxiaoNeural'
+        form.microsoft.language = configData.language || 'zh-CN'
+        form.microsoft.timeout = configData.timeout || 60
         break
     }
   } catch (error) {
@@ -607,6 +653,13 @@ const resetForm = () => {
       device_id: 'ba:8f:17:de:94:94',
       client_id: 'e4b0c442-98fc-4e1b-8c3d-6a5b6a5b6a6d',
       token: 'test-token'
+    },
+    microsoft: {
+      subscription_key: '',
+      region: 'eastasia',
+      voice: 'zh-CN-XiaoxiaoNeural',
+      language: 'zh-CN',
+      timeout: 60
     }
   })
 }

@@ -3,6 +3,7 @@ module xiaozhi-esp32-server-golang
 go 1.24.4
 
 require (
+	github.com/Microsoft/cognitive-services-speech-sdk-go v1.43.0
 	github.com/ThinkInAIXYZ/go-mcp v0.2.19
 	github.com/antonfisher/nested-logrus-formatter v1.3.1
 	github.com/asaskevich/EventBus v0.0.0-20200907212545-49d423059eef

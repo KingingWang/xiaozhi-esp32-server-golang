@@ -6,8 +6,9 @@ const (
 )
 
 const (
-	AsrTypeFunAsr = "funasr"
-	AsrTypeDoubao = "doubao"
+	AsrTypeFunAsr    = "funasr"
+	AsrTypeDoubao    = "doubao"
+	AsrTypeMicrosoft = "microsoft"
 )
 
 const (
@@ -25,4 +26,5 @@ const (
 	TtsTypeEdgeOffline = "edge_offline"
 	TtsTypeXiaozhi     = "xiaozhi"
 	TtsTypeOpenAI      = "openai"
+	TtsTypeMicrosoft   = "microsoft"
 )
