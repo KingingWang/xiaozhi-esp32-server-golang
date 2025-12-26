@@ -226,7 +226,7 @@ ota:
 
 **SQL规则**：
 ```sql
-SELECT clientid, first(regex_extract(clientid, 'GID.+@@@([^@]+)@@@.+' )) as device_id, payload FROM "device-server"
+SELECT clientid, payload FROM "device-server"
 ```
 
 **配置参数**：
