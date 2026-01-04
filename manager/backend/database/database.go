@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"xiaozhi/manager/backend/config"
+	"xiaozhi/manager/backend/models"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/sqlite"
@@ -33,9 +34,21 @@ func Init(cfg config.DatabaseConfig) *gorm.DB {
 
 	log.Println("数据库连接成功")
 
-	// 注意：不再自动创建表结构和默认管理员用户
-	// 这些操作现在由引导页面通过API接口来处理
-	log.Println("数据库连接成功，等待引导页面初始化...")
+	// 自动迁移数据库表结构
+	log.Println("开始自动迁移数据库表结构...")
+	err = db.AutoMigrate(
+		&models.User{},
+		&models.Device{},
+		&models.Agent{},
+		&models.Config{},
+		&models.GlobalRole{},
+	)
+	if err != nil {
+		log.Printf("数据库表结构迁移失败: %v", err)
+		log.Println("将使用fallback模式运行（硬编码用户验证）")
+		return nil
+	}
+	log.Println("数据库表结构迁移成功")
 
 	return db
 }
