@@ -153,6 +153,9 @@ func (c *ChatSession) CmdMessageLoop(ctx context.Context) {
 			recvFailCount = recvFailCount + 1
 			continue
 		}
+		if message == nil {
+			continue
+		}
 		recvFailCount = 0
 		log.Infof("收到文本消息: %s", string(message))
 		if err := c.HandleTextMessage(message); err != nil {
@@ -174,6 +177,9 @@ func (c *ChatSession) AudioMessageLoop(ctx context.Context) {
 		if err != nil {
 			log.Errorf("recv audio error: %v", err)
 			return
+		}
+		if message == nil {
+			continue
 		}
 		log.Debugf("收到音频数据，大小: %d 字节", len(message))
 		isAuth := viper.GetBool("auth.enable")
