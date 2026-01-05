@@ -4,9 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"time"
+	"xiaozhi-esp32-server-golang/internal/components/http"
 	"xiaozhi-esp32-server-golang/internal/domain/config/types"
 	log "xiaozhi-esp32-server-golang/logger"
 )
@@ -15,9 +14,7 @@ import (
 // 提供高层级的配置管理功能，包括缓存、热更新、配置验证等
 type ConfigManager struct {
 	// HTTP客户端
-	httpClient *http.Client
-	// 后端管理系统基础URL
-	baseURL string
+	client *http.ManagerClient
 }
 
 // NewConfigManager 创建新的配置管理器
@@ -26,18 +23,21 @@ func NewManagerUserConfigProvider(config map[string]interface{}) (*ConfigManager
 	var baseURL string
 	if backendUrl := config["backend_url"]; backendUrl != nil {
 		baseURL = backendUrl.(string)
-	} else {
+	}
+	// 如果配置中没有，使用默认值
+	if baseURL == "" {
 		baseURL = "http://localhost:8080" // 默认值
 	}
 
-	// 创建HTTP客户端
-	httpClient := &http.Client{
-		Timeout: 10 * time.Second,
-	}
+	// 创建Manager HTTP客户端
+	managerClient := http.NewManagerClient(http.ManagerClientConfig{
+		BaseURL:    baseURL,
+		Timeout:    10 * time.Second,
+		MaxRetries: 3,
+	})
 
 	manager := &ConfigManager{
-		httpClient: httpClient,
-		baseURL:    baseURL,
+		client: managerClient,
 	}
 
 	log.Log().Info("配置管理器初始化成功", "backend_url", baseURL)
@@ -45,30 +45,6 @@ func NewManagerUserConfigProvider(config map[string]interface{}) (*ConfigManager
 }
 
 func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (types.UConfig, error) {
-	// 构建请求URL
-	url := c.baseURL + "/api/configs?device_id=" + deviceID
-
-	// 创建HTTP请求
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		log.Log().Error("创建HTTP请求失败", "error", err)
-		return types.UConfig{}, err
-	}
-
-	// 发送请求
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		log.Log().Error("发送HTTP请求失败", "error", err, "url", url)
-		return types.UConfig{}, err
-	}
-	defer resp.Body.Close()
-
-	// 检查响应状态
-	if resp.StatusCode != http.StatusOK {
-		log.Log().Error("HTTP请求返回错误状态", "status_code", resp.StatusCode, "url", url)
-		return types.UConfig{}, fmt.Errorf("HTTP request failed with status: %d", resp.StatusCode)
-	}
-
 	// 解析响应
 	var response struct {
 		Data struct {
@@ -97,8 +73,17 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 		} `json:"data"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		log.Log().Error("解析HTTP响应失败", "error", err)
+	// 发送HTTP请求
+	err := c.client.DoRequest(ctx, http.RequestOptions{
+		Method: "GET",
+		Path:   "/api/configs",
+		QueryParams: map[string]string{
+			"device_id": deviceID,
+		},
+		Response: &response,
+	})
+	if err != nil {
+		log.Log().Error("获取用户配置失败", "error", err, "device_id", deviceID)
 		return types.UConfig{}, err
 	}
 
@@ -146,51 +131,22 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 
 // 获取 mqtt, mqtt_server, udp, ota, vision配置
 func (c *ConfigManager) GetSystemConfig(ctx context.Context) (string, error) {
-	// 构建backend API URL
-	apiURL := fmt.Sprintf("%s/api/system/configs", c.baseURL)
-
-	// 创建HTTP请求
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("创建HTTP请求失败: %w", err)
-	}
-
-	// 设置请求头
-	req.Header.Set("Content-Type", "application/json")
-
-	// 发送请求
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("发送HTTP请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// 检查响应状态码
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("API请求失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
-	}
-
-	// 读取响应体
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("读取响应体失败: %w", err)
-	}
-
-	log.Debugf("从内控获取到系统配置: %s", string(body))
-
 	// 解析响应JSON
 	var apiResponse struct {
 		Data map[string]interface{} `json:"data"`
 	}
 
-	if err := json.Unmarshal(body, &apiResponse); err != nil {
-		return "", fmt.Errorf("解析API响应失败: %w", err)
+	// 发送HTTP请求
+	err := c.client.DoRequest(ctx, http.RequestOptions{
+		Method:   "GET",
+		Path:     "/api/system/configs",
+		Response: &apiResponse,
+	})
+	if err != nil {
+		return "", fmt.Errorf("获取系统配置失败: %w", err)
 	}
+
+	log.Debugf("从内控获取到系统配置: %+v", apiResponse.Data)
 
 	// 将API响应转换为配置JSON字符串
 	configJSON, err := json.Marshal(apiResponse.Data)

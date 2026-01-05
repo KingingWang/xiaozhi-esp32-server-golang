@@ -1,16 +1,11 @@
 package history
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
+	"xiaozhi-esp32-server-golang/internal/components/http"
 )
 
 // MessageType 消息类型
@@ -25,32 +20,30 @@ const (
 
 // HistoryClientConfig 客户端配置
 type HistoryClientConfig struct {
-	BaseURL     string        // Manager后端地址
-	AuthToken   string        // 认证Token
-	Timeout     time.Duration // 请求超时
-	Enabled     bool          // 是否启用
-	EnableAudio bool          // 是否保存音频
+	BaseURL   string        // Manager后端地址
+	AuthToken string        // 认证Token
+	Timeout   time.Duration // 请求超时
+	Enabled   bool          // 是否启用
 }
 
 // HistoryClient 聊天历史HTTP客户端
 type HistoryClient struct {
-	httpClient  *http.Client
-	baseURL     string
-	authToken   string
-	enabled     bool
-	enableAudio bool // 是否启用音频保存
+	client  *http.ManagerClient
+	enabled bool
 }
 
 // NewHistoryClient 创建聊天历史客户端
 func NewHistoryClient(cfg HistoryClientConfig) *HistoryClient {
+	managerClient := http.NewManagerClient(http.ManagerClientConfig{
+		BaseURL:    cfg.BaseURL,
+		AuthToken:  cfg.AuthToken,
+		Timeout:    cfg.Timeout,
+		MaxRetries: 3, // 默认重试3次
+	})
+
 	return &HistoryClient{
-		httpClient: &http.Client{
-			Timeout: cfg.Timeout,
-		},
-		baseURL:     cfg.BaseURL,
-		authToken:   cfg.AuthToken,
-		enabled:     cfg.Enabled,
-		enableAudio: cfg.EnableAudio,
+		client:  managerClient,
+		enabled: cfg.Enabled,
 	}
 }
 
@@ -74,51 +67,11 @@ func (c *HistoryClient) SaveMessage(ctx context.Context, req *SaveMessageRequest
 	if !c.enabled {
 		return nil
 	}
-	return c.doRequest(ctx, "POST", "/api/internal/history/messages", req, nil)
-}
-
-// doRequest 执行HTTP请求，带重试机制
-func (c *HistoryClient) doRequest(ctx context.Context, method, path string, reqBody, respBody interface{}) error {
-	operation := func() error {
-		var bodyReader io.Reader
-		if reqBody != nil {
-			data, err := json.Marshal(reqBody)
-			if err != nil {
-				return err
-			}
-			bodyReader = bytes.NewReader(data)
-		}
-
-		url := c.baseURL + path
-		req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
-		if err != nil {
-			return err
-		}
-
-		req.Header.Set("Content-Type", "application/json")
-		if c.authToken != "" {
-			req.Header.Set("Authorization", "Bearer "+c.authToken)
-		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode >= 400 {
-			body, _ := io.ReadAll(resp.Body)
-			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-		}
-
-		if respBody != nil {
-			return json.NewDecoder(resp.Body).Decode(respBody)
-		}
-		return nil
-	}
-
-	backoffCfg := backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3)
-	return backoff.Retry(operation, backoffCfg)
+	return c.client.DoRequest(ctx, http.RequestOptions{
+		Method: "POST",
+		Path:   "/api/internal/history/messages",
+		Body:   req,
+	})
 }
 
 // UpdateMessageAudioRequest 更新消息音频请求
@@ -135,11 +88,11 @@ func (c *HistoryClient) UpdateMessageAudio(ctx context.Context, req *UpdateMessa
 	if !c.enabled {
 		return nil
 	}
-	// 检查是否启用音频保存
-	if !c.enableAudio {
-		return nil
-	}
-	return c.doRequest(ctx, "PUT", "/api/internal/history/messages/"+req.MessageID+"/audio", req, nil)
+	return c.client.DoRequest(ctx, http.RequestOptions{
+		Method: "PUT",
+		Path:   "/api/internal/history/messages/" + req.MessageID + "/audio",
+		Body:   req,
+	})
 }
 
 // GetMessagesRequest 获取消息请求
@@ -170,17 +123,25 @@ func (c *HistoryClient) GetMessages(ctx context.Context, req *GetMessagesRequest
 		return nil, fmt.Errorf("history client is disabled")
 	}
 
-	// GET 请求需要将参数放在 URL 中（使用 url.Values 进行编码）
-	params := url.Values{}
-	params.Set("device_id", req.DeviceID)
-	params.Set("agent_id", req.AgentID)
-	params.Set("limit", fmt.Sprintf("%d", req.Limit))
-	if req.SessionID != "" {
-		params.Set("session_id", req.SessionID)
+	// 构建查询参数
+	queryParams := map[string]string{
+		"device_id": req.DeviceID,
+		"agent_id":  req.AgentID,
+		"limit":     fmt.Sprintf("%d", req.Limit),
 	}
-	path := "/api/internal/history/messages?" + params.Encode()
+	if req.SessionID != "" {
+		queryParams["session_id"] = req.SessionID
+	}
 
 	var resp GetMessagesResponse
-	err := c.doRequest(ctx, "GET", path, nil, &resp)
-	return &resp, err
+	err := c.client.DoRequest(ctx, http.RequestOptions{
+		Method:      "GET",
+		Path:        "/api/internal/history/messages",
+		QueryParams: queryParams,
+		Response:    &resp,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }

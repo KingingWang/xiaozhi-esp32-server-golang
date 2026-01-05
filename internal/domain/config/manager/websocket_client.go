@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -67,7 +68,11 @@ func GetDefaultClient() *WebSocketClient {
 }
 
 func NewWebSocketClient() *WebSocketClient {
-	baseURL := viper.GetString("manager.backend_url")
+	// 优先从环境变量获取，然后从配置获取
+	baseURL := os.Getenv("BACKEND_URL")
+	if baseURL == "" {
+		baseURL = viper.GetString("manager.backend_url")
+	}
 	if baseURL == "" {
 		baseURL = "http://localhost:8080"
 	}

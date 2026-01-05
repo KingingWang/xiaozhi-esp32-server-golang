@@ -156,11 +156,10 @@ func (s *ChatSession) shouldUseManager() bool {
 func (s *ChatSession) loadFromManager() ([]*schema.Message, error) {
 	// 创建 HistoryClient
 	historyCfg := history.HistoryClientConfig{
-		BaseURL:     viper.GetString("manager.backend_url"),
-		AuthToken:   viper.GetString("manager.history_auth_token"),
-		Timeout:     viper.GetDuration("manager.history_timeout"),
-		Enabled:     true,
-		EnableAudio: false, // 初始化时不需要音频
+		BaseURL:   util.GetBackendURL(),
+		AuthToken: viper.GetString("manager.history_auth_token"),
+		Timeout:   viper.GetDuration("manager.history_timeout"),
+		Enabled:   true,
 	}
 	client := history.NewHistoryClient(historyCfg)
 

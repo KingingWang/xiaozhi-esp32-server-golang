@@ -1,18 +1,14 @@
 package manager
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"strconv"
 
+	"xiaozhi-esp32-server-golang/internal/components/http"
 	"xiaozhi-esp32-server-golang/internal/domain/config/types"
 	log "xiaozhi-esp32-server-golang/logger"
 )
@@ -150,38 +146,20 @@ func (am *ConfigManager) verifyHMAC(challenge, providedHmac string) bool {
 
 // callCheckActivationAPI 调用检查激活状态接口
 func (am *ConfigManager) callCheckActivationAPI(ctx context.Context, deviceId, clientId string) (bool, error) {
-	// 构建请求URL
-	reqURL := fmt.Sprintf("%s/api/public/device/check-activation", am.baseURL)
-
-	// 添加查询参数
-	params := url.Values{}
-	params.Add("device_id", deviceId)
-	params.Add("client_id", clientId)
-	reqURL += "?" + params.Encode()
-
-	// 创建HTTP请求
-	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
-	if err != nil {
-		return false, fmt.Errorf("创建请求失败: %v", err)
-	}
-
-	// 发送请求
-	resp, err := am.httpClient.Do(req)
-	if err != nil {
-		return false, fmt.Errorf("请求失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// 读取响应
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return false, fmt.Errorf("读取响应失败: %v", err)
-	}
-
-	// 解析响应
 	var response CheckActivationResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return false, fmt.Errorf("解析响应失败: %v", err)
+
+	// 发送HTTP请求
+	err := am.client.DoRequest(ctx, http.RequestOptions{
+		Method: "GET",
+		Path:   "/api/public/device/check-activation",
+		QueryParams: map[string]string{
+			"device_id": deviceId,
+			"client_id": clientId,
+		},
+		Response: &response,
+	})
+	if err != nil {
+		return false, fmt.Errorf("请求失败: %w", err)
 	}
 
 	log.Log().Debugf("检查激活状态响应: %+v", response)
@@ -190,41 +168,20 @@ func (am *ConfigManager) callCheckActivationAPI(ctx context.Context, deviceId, c
 
 // callGetActivationInfoAPI 调用获取激活信息接口
 func (am *ConfigManager) callGetActivationInfoAPI(ctx context.Context, deviceId, clientId string) (bool, string, string, string, error) {
-	// 构建请求URL
-	reqURL := fmt.Sprintf("%s/api/public/device/activation-info", am.baseURL)
-
-	// 添加查询参数
-	params := url.Values{}
-	params.Add("device_id", deviceId)
-	params.Add("client_id", clientId)
-	reqURL += "?" + params.Encode()
-
-	// 创建HTTP请求
-	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
-	if err != nil {
-		return false, "", "", "", fmt.Errorf("创建请求失败: %v", err)
-	}
-
-	// 发送请求
-	resp, err := am.httpClient.Do(req)
-	if err != nil {
-		return false, "", "", "", fmt.Errorf("请求失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// 读取响应
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return false, "", "", "", fmt.Errorf("读取响应失败: %v", err)
-	}
-
-	// 添加更详细的响应日志
-	log.Log().Debugf("激活信息API响应状态码: %d, 响应体: %s", resp.StatusCode, string(body))
-
-	// 解析响应
 	var response GetActivationInfoResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return false, "", "", "", fmt.Errorf("解析响应失败: %v", err)
+
+	// 发送HTTP请求
+	err := am.client.DoRequest(ctx, http.RequestOptions{
+		Method: "GET",
+		Path:   "/api/public/device/activation-info",
+		QueryParams: map[string]string{
+			"device_id": deviceId,
+			"client_id": clientId,
+		},
+		Response: &response,
+	})
+	if err != nil {
+		return false, "", "", "", fmt.Errorf("请求失败: %w", err)
 	}
 
 	log.Log().Debugf("获取激活信息响应: %+v", response)
@@ -238,9 +195,6 @@ func (am *ConfigManager) callGetActivationInfoAPI(ctx context.Context, deviceId,
 
 // callActivateDeviceAPI 调用设备激活接口
 func (am *ConfigManager) callActivateDeviceAPI(ctx context.Context, deviceId, clientId string, activationPayload types.ActivationPayload) (bool, error) {
-	// 构建请求URL
-	reqURL := fmt.Sprintf("%s/api/public/device/activate", am.baseURL)
-
 	// 构建请求体
 	request := ActivateDeviceRequest{
 		DeviceId:     deviceId,
@@ -251,36 +205,17 @@ func (am *ConfigManager) callActivateDeviceAPI(ctx context.Context, deviceId, cl
 		Hmac:         activationPayload.HMAC,
 	}
 
-	// 序列化请求体
-	requestBody, err := json.Marshal(request)
-	if err != nil {
-		return false, fmt.Errorf("序列化请求失败: %v", err)
-	}
-
-	// 创建HTTP请求
-	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewBuffer(requestBody))
-	if err != nil {
-		return false, fmt.Errorf("创建请求失败: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// 发送请求
-	resp, err := am.httpClient.Do(req)
-	if err != nil {
-		return false, fmt.Errorf("请求失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// 读取响应
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return false, fmt.Errorf("读取响应失败: %v", err)
-	}
-
-	// 解析响应
 	var response ActivateDeviceResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return false, fmt.Errorf("解析响应失败: %v", err)
+
+	// 发送HTTP请求
+	err := am.client.DoRequest(ctx, http.RequestOptions{
+		Method:   "POST",
+		Path:     "/api/public/device/activate",
+		Body:     request,
+		Response: &response,
+	})
+	if err != nil {
+		return false, fmt.Errorf("请求失败: %w", err)
 	}
 
 	log.Log().Debugf("设备激活响应: %+v", response)

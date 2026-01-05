@@ -23,9 +23,7 @@ config_provider:          #对应domain/config/中的provider
 manager:                  #内控管理配置, 对应domain/config/manager/manager.go
   backend_url: "http://127.0.0.1:8080" #内控地址
   # 聊天历史记录配置
-  history_enabled: true      # 是否启用聊天历史记录
   history_auth_token: ""     # 认证Token（可选）
-  history_enable_audio: true # 是否保存音频数据
   history_timeout: 5s        # HTTP请求超时时间
 
 # 系统提示词，定义AI助手的角色和行为
