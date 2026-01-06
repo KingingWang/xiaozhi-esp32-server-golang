@@ -43,6 +43,8 @@ func Init(cfg config.DatabaseConfig) *gorm.DB {
 		&models.Config{},
 		&models.GlobalRole{},
 		&models.ChatMessage{},
+		&models.SpeakerGroup{},
+		&models.SpeakerSample{},
 	)
 	if err != nil {
 		log.Printf("数据库表结构迁移失败: %v", err)

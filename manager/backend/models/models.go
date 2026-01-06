@@ -81,6 +81,8 @@ type SpeakerGroup struct {
 	Name        string    `json:"name" gorm:"type:varchar(100);not null;uniqueIndex:idx_speaker_groups_user_name,priority:2"`
 	Prompt      string    `json:"prompt" gorm:"type:text"`
 	Description string    `json:"description" gorm:"type:text"`
+	TTSConfigID *string   `json:"tts_config_id" gorm:"type:varchar(100)"` // TTS配置ID
+	Voice       *string   `json:"voice" gorm:"type:varchar(200)"`         // 音色值
 	Status      string    `json:"status" gorm:"type:varchar(20);default:'active'"`
 	SampleCount int       `json:"sample_count" gorm:"default:0"`
 	CreatedAt   time.Time `json:"created_at"`

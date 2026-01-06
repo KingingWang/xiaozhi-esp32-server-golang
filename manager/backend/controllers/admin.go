@@ -53,6 +53,8 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 		Prompt      string   `json:"prompt"`
 		Description string   `json:"description"`
 		Uuids       []string `json:"uuids"`
+		TTSConfigID *string  `json:"tts_config_id"`
+		Voice       *string  `json:"voice"`
 	}
 
 	type ConfigResponse struct {
@@ -214,6 +216,8 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 					Prompt:      speakerGroup.Prompt,
 					Description: speakerGroup.Description,
 					Uuids:       uuids,
+					TTSConfigID: speakerGroup.TTSConfigID,
+					Voice:       speakerGroup.Voice,
 				}
 			}
 		}
@@ -222,11 +226,11 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": response})
 }
 
-// GetSystemConfigs 获取系统配置信息，包括mqtt, mqtt_server, udp, ota, mcp, local_mcp, voice_identify
+// GetSystemConfigs 获取系统配置信息，包括mqtt, mqtt_server, udp, ota, mcp, local_mcp, voice_identify, tts
 func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 	// 一次性获取所有相关配置（包括启用和未启用的）
 	var allConfigs []models.Config
-	if err := ac.DB.Where("type IN (?)", []string{"mqtt", "mqtt_server", "udp", "ota", "mcp", "local_mcp", "voice_identify"}).Find(&allConfigs).Error; err != nil {
+	if err := ac.DB.Where("type IN (?)", []string{"mqtt", "mqtt_server", "udp", "ota", "mcp", "local_mcp", "voice_identify", "tts"}).Find(&allConfigs).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get system configs"})
 		return
 	}
@@ -460,11 +464,33 @@ func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 		// 如果获取到了 base_url，添加到响应中
 		if baseURL != "" {
 			response["voice_identify"] = gin.H{
-				"base_url": baseURL,
+				"base_url":  baseURL,
 				"threshold": threshold,
-				"enable":   enabled,
+				"enable":    enabled,
 			}
 		}
+	}
+
+	// 处理 TTS 配置，返回所有启用的 TTS 配置列表
+	if ttsConfigs, exists := configsByType["tts"]; exists && len(ttsConfigs) > 0 {
+		var allTTSConfigs []gin.H
+		for _, config := range ttsConfigs {
+			if config.Enabled { // 只返回启用的配置
+				var configData map[string]interface{}
+				if config.JsonData != "" {
+					json.Unmarshal([]byte(config.JsonData), &configData)
+				}
+
+				allTTSConfigs = append(allTTSConfigs, gin.H{
+					"config_id":  config.ConfigID,
+					"name":       config.Name,
+					"provider":   config.Provider,
+					"config":     configData,
+					"is_default": config.IsDefault,
+				})
+			}
+		}
+		response["all_tts_configs"] = allTTSConfigs
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": response})

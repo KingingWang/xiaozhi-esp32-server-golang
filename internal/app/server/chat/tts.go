@@ -116,7 +116,7 @@ func (t *TTSManager) handleTts(ctx context.Context, llmResponse llm_common.LLMRe
 	}
 
 	// 使用带上下文的TTS处理
-	outputChan, err := t.clientState.TTSProvider.TextToSpeechStream(ctx, llmResponse.Text, t.clientState.OutputAudioFormat.SampleRate, t.clientState.OutputAudioFormat.Channels, t.clientState.OutputAudioFormat.FrameDuration)
+	outputChan, err := t.clientState.GetTtsProvider().TextToSpeechStream(ctx, llmResponse.Text, t.clientState.OutputAudioFormat.SampleRate, t.clientState.OutputAudioFormat.Channels, t.clientState.OutputAudioFormat.FrameDuration)
 	if err != nil {
 		log.Errorf("生成 TTS 音频失败: %v", err)
 		return fmt.Errorf("生成 TTS 音频失败: %v", err)

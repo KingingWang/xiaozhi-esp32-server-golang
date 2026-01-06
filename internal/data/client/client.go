@@ -63,7 +63,8 @@ type ClientState struct {
 	Llm
 
 	// TTS 提供者
-	TTSProvider tts.TTSProvider
+	TTSProvider        tts.TTSProvider // 默认TTS提供者
+	SpeakerTTSProvider tts.TTSProvider // 声纹识别的TTS提供者（优先使用）
 	// memory提供者
 	MemoryProvider memory.MemoryProvider
 	MemoryContext  string //memory context
@@ -104,6 +105,15 @@ type ClientState struct {
 
 	// 异步获取声纹结果的回调函数（在 session 中设置）
 	OnVoiceSilenceSpeakerCallback func(ctx context.Context)
+}
+
+// GetTtsProvider 获取当前应该使用的TTS Provider
+// 优先使用声纹识别的TTS Provider，如果没有则使用TTSProvider（默认）
+func (c *ClientState) GetTtsProvider() tts.TTSProvider {
+	if c.SpeakerTTSProvider != nil {
+		return c.SpeakerTTSProvider
+	}
+	return c.TTSProvider
 }
 
 // IsSpeakerEnabled 检查是否启用声纹识别（从全局配置中读取）

@@ -172,6 +172,51 @@
             show-word-limit
           />
         </el-form-item>
+        <el-form-item label="TTS配置" prop="tts_config_id">
+          <el-select
+            v-model="groupForm.tts_config_id"
+            placeholder="请选择TTS配置（可选）"
+            clearable
+            style="width: 100%"
+            @change="handleTtsConfigChange"
+          >
+            <el-option
+              v-for="ttsConfig in ttsConfigs"
+              :key="ttsConfig.config_id"
+              :label="ttsConfig.is_default ? `${ttsConfig.name} (默认)` : ttsConfig.name"
+              :value="ttsConfig.config_id"
+            >
+              <div class="config-option">
+                {{ ttsConfig.name }}
+                <el-tag v-if="ttsConfig.is_default" type="success" size="small" style="margin-left: 8px;">默认</el-tag>
+              </div>
+              <span class="config-desc">{{ ttsConfig.provider || '暂无描述' }}</span>
+            </el-option>
+          </el-select>
+          <div class="form-help" v-if="groupForm.tts_config_id">
+            {{ getCurrentTtsConfigInfo() }}
+          </div>
+        </el-form-item>
+        <el-form-item label="音色" prop="voice" v-if="groupForm.tts_config_id">
+          <el-select
+            v-model="groupForm.voice"
+            placeholder="请选择或输入音色"
+            filterable
+            allow-create
+            clearable
+            style="width: 100%"
+          >
+            <el-option
+              v-for="voice in currentVoiceOptions"
+              :key="voice.value"
+              :label="voice.label"
+              :value="voice.value"
+            />
+          </el-select>
+          <div class="form-help">
+            当前TTS配置: {{ getCurrentTtsConfigName() }}，可以搜索音色名称或值，也可以手动输入自定义音色值。
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="showGroupDialog = false">取消</el-button>
@@ -735,7 +780,9 @@ const groupForm = reactive({
   agent_id: null,
   name: '',
   prompt: '',
-  description: ''
+  description: '',
+  tts_config_id: null,
+  voice: null
 })
 
 const groupRules = {
@@ -747,6 +794,10 @@ const groupRules = {
     { min: 1, max: 100, message: '长度在 1 到 100 个字符', trigger: 'blur' }
   ]
 }
+
+// TTS配置相关
+const ttsConfigs = ref([])
+const currentVoiceOptions = ref([])
 
 // 上传表单
 const uploadForm = reactive({
@@ -818,6 +869,144 @@ const loadAgents = async () => {
   }
 }
 
+// 加载TTS配置列表
+const loadTtsConfigs = async () => {
+  try {
+    const response = await api.get('/user/tts-configs')
+    ttsConfigs.value = response.data.data || []
+  } catch (error) {
+    console.error('加载TTS配置失败:', error)
+    ElMessage.error('加载TTS配置失败')
+  }
+}
+
+// TTS配置变化时，加载对应的音色选项
+const handleTtsConfigChange = async (configId) => {
+  if (!configId) {
+    currentVoiceOptions.value = []
+    groupForm.voice = null
+    return
+  }
+  
+  const config = ttsConfigs.value.find(c => c.config_id === configId)
+  if (!config) {
+    currentVoiceOptions.value = []
+    return
+  }
+
+  try {
+    // 从后端API获取该provider的完整音色列表
+    const response = await api.get('/user/voice-options', {
+      params: { provider: config.provider }
+    })
+    currentVoiceOptions.value = response.data.data || []
+  } catch (error) {
+    console.error('加载音色列表失败:', error)
+    // 降级到本地提取
+    const jsonData = typeof config.json_data === 'string' ? JSON.parse(config.json_data) : config.json_data
+    currentVoiceOptions.value = extractVoiceOptions(config.provider, jsonData)
+  }
+}
+
+// 根据不同provider提取音色选项
+const extractVoiceOptions = (provider, config) => {
+  const options = []
+  
+  if (!config) return options
+  
+  // 根据不同的TTS提供商提取音色
+  switch (provider) {
+    case 'edge':
+    case 'microsoft':
+      // Edge TTS 常用音色
+      if (config.voice) {
+        options.push({ label: config.voice, value: config.voice })
+      }
+      // 添加常用的中文音色
+      const edgeVoices = [
+        { label: 'zh-CN-XiaoxiaoNeural (晓晓)', value: 'zh-CN-XiaoxiaoNeural' },
+        { label: 'zh-CN-YunxiNeural (云希)', value: 'zh-CN-YunxiNeural' },
+        { label: 'zh-CN-YunyangNeural (云扬)', value: 'zh-CN-YunyangNeural' },
+        { label: 'zh-CN-XiaoyiNeural (晓伊)', value: 'zh-CN-XiaoyiNeural' },
+        { label: 'zh-CN-YunjianNeural (云健)', value: 'zh-CN-YunjianNeural' },
+        { label: 'zh-CN-XiaochenNeural (晓辰)', value: 'zh-CN-XiaochenNeural' },
+        { label: 'zh-CN-XiaohanNeural (晓涵)', value: 'zh-CN-XiaohanNeural' }
+      ]
+      edgeVoices.forEach(v => {
+        if (!options.find(o => o.value === v.value)) {
+          options.push(v)
+        }
+      })
+      break
+      
+    case 'doubao':
+    case 'doubao_ws':
+      // 豆包TTS音色
+      if (config.voice) {
+        options.push({ label: config.voice, value: config.voice })
+      }
+      const doubaoVoices = [
+        { label: '双快思思 (甜美女声)', value: 'zh_female_shuangkuaisisi_moon_bigtts' },
+        { label: 'BV700 V2 (男声)', value: 'BV700_V2_streaming' },
+        { label: 'BV001 (女声)', value: 'BV001_streaming' },
+        { label: 'BV002 (男声)', value: 'BV002_streaming' }
+      ]
+      doubaoVoices.forEach(v => {
+        if (!options.find(o => o.value === v.value)) {
+          options.push(v)
+        }
+      })
+      break
+      
+    case 'cosyvoice':
+      // CosyVoice 使用 spk_id
+      if (config.spk_id) {
+        options.push({ label: config.spk_id, value: config.spk_id })
+      }
+      const cosyVoices = [
+        { label: '中文女', value: '中文女' },
+        { label: '中文男', value: '中文男' },
+        { label: '粤语女', value: '粤语女' },
+        { label: '英文女', value: '英文女' },
+        { label: '英文男', value: '英文男' },
+        { label: '日语男', value: '日语男' },
+        { label: '韩语女', value: '韩语女' }
+      ]
+      cosyVoices.forEach(v => {
+        if (!options.find(o => o.value === v.value)) {
+          options.push(v)
+        }
+      })
+      break
+      
+    default:
+      // 其他provider，尝试从配置中提取
+      if (config.voice) {
+        options.push({ label: config.voice, value: config.voice })
+      }
+      if (config.spk_id) {
+        options.push({ label: config.spk_id, value: config.spk_id })
+      }
+  }
+  
+  return options
+}
+
+// 获取当前TTS配置名称
+const getCurrentTtsConfigName = () => {
+  if (!groupForm.tts_config_id) return ''
+  const config = ttsConfigs.value.find(c => c.config_id === groupForm.tts_config_id)
+  return config ? config.name : ''
+}
+
+// 获取当前TTS配置信息
+const getCurrentTtsConfigInfo = () => {
+  if (!groupForm.tts_config_id) return ''
+  const config = ttsConfigs.value.find(c => c.config_id === groupForm.tts_config_id)
+  if (!config) return ''
+  return `TTS提供商: ${config.provider || '未知'}`
+}
+
 // 加载声纹组列表
 const loadSpeakerGroups = async () => {
   try {
@@ -856,6 +1045,14 @@ const handleEditGroup = (group) => {
   groupForm.name = group.name
   groupForm.prompt = group.prompt || ''
   groupForm.description = group.description || ''
+  groupForm.tts_config_id = group.tts_config_id || null
+  groupForm.voice = group.voice || null
+  
+  // 如果有TTS配置，加载对应的音色选项
+  if (groupForm.tts_config_id) {
+    handleTtsConfigChange(groupForm.tts_config_id)
+  }
+  
   showGroupDialog.value = true
 }
 
@@ -1788,9 +1985,12 @@ const resetGroupForm = () => {
     agent_id: null,
     name: '',
     prompt: '',
-    description: ''
+    description: '',
+    tts_config_id: null,
+    voice: null
   })
   currentGroup.value = null
+  currentVoiceOptions.value = []
 }
 
 const resetUploadForm = () => {
@@ -1854,6 +2054,7 @@ const formatFileSize = (bytes) => {
 onMounted(() => {
   loadAgents()
   loadSpeakerGroups()
+  loadTtsConfigs()
 })
 
 // 组件卸载前清理资源

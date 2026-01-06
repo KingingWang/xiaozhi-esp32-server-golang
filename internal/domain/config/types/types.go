@@ -36,6 +36,8 @@ type SpeakerGroupInfo struct {
 	Prompt      string   `json:"prompt"`
 	Description string   `json:"description"`
 	Uuids       []string `json:"uuids"`
+	TTSConfigID *string  `json:"tts_config_id"`
+	Voice       *string  `json:"voice"`
 }
 
 type UConfig struct {
@@ -47,4 +49,12 @@ type UConfig struct {
 	Memory        MemoryConfig                `json:"memory"`
 	VoiceIdentify map[string]SpeakerGroupInfo `json:"voice_identify"` // 声纹识别配置
 	AgentId       string                      `json:"agent_id"`       //所属agent_id
+}
+
+type TtsConfigItem struct {
+	ConfigID  string                 `json:"config_id"`
+	Name      string                 `json:"name"`
+	Provider  string                 `json:"provider"`
+	Config    map[string]interface{} `json:"config"`
+	IsDefault bool                   `json:"is_default"`
 }

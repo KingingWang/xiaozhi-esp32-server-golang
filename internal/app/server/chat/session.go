@@ -22,6 +22,7 @@ import (
 	"xiaozhi-esp32-server-golang/internal/data/history"
 	. "xiaozhi-esp32-server-golang/internal/data/msg"
 	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
+	"xiaozhi-esp32-server-golang/internal/domain/config/types"
 	"xiaozhi-esp32-server-golang/internal/domain/eventbus"
 	"xiaozhi-esp32-server-golang/internal/domain/llm"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
@@ -1038,6 +1039,12 @@ func (s *ChatSession) actionDoChat(ctx context.Context, text string, speakerResu
 
 	sessionID := clientState.SessionID
 
+	// 声纹识别后动态切换TTS（未识别到时恢复默认TTS）
+	if err := s.switchTTSForSpeaker(speakerResult); err != nil {
+		log.Warnf("切换TTS失败: %v", err)
+		// 不中断流程，继续使用当前TTS
+	}
+
 	// 直接创建Eino原生消息
 	userMessage := &schema.Message{
 		Role:    schema.User,
@@ -1077,5 +1084,107 @@ func (s *ChatSession) actionDoChat(ctx context.Context, text string, speakerResu
 		log.Errorf("发送带工具的 LLM 请求失败, seesionID: %s, error: %v", sessionID, err)
 		return fmt.Errorf("发送带工具的 LLM 请求失败: %v", err)
 	}
+	return nil
+}
+
+// switchTTSForSpeaker 为识别的说话人切换TTS
+func (s *ChatSession) switchTTSForSpeaker(speakerResult *speaker.IdentifyResult) error {
+	s.clientState.SpeakerTTSProvider = nil
+
+	// 1. 检查 speakerResult 是否为 nil
+	if speakerResult == nil {
+		log.Debug("speakerResult 为 nil，清空声纹TTS Provider")
+		return nil
+	}
+
+	// 2. 查找声纹组配置
+	speakerGroupInfo, found := s.clientState.DeviceConfig.VoiceIdentify[speakerResult.SpeakerName]
+	if !found {
+		// 未找到配置，清空声纹TTS Provider
+		log.Debugf("未找到声纹组 %s 的配置，清空声纹TTS Provider", speakerResult.SpeakerName)
+		return nil
+	}
+
+	// 3. 检查是否配置了自定义音色
+	if speakerGroupInfo.TTSConfigID == nil || *speakerGroupInfo.TTSConfigID == "" {
+		// 未配置自定义音色，清空声纹TTS Provider
+		log.Debugf("声纹组 %s 未配置自定义TTS，清空声纹TTS Provider", speakerResult.SpeakerName)
+		return nil
+	}
+
+	// 4. 从系统配置（viper）中查找对应的TTS配置
+	var targetTTSConfig *types.TtsConfigItem
+	allTTSConfigsRaw := viper.Get("all_tts_configs")
+	if allTTSConfigsRaw == nil {
+		return fmt.Errorf("系统配置中未找到 all_tts_configs")
+	}
+
+	// 解析 all_tts_configs
+	if configsArray, ok := allTTSConfigsRaw.([]interface{}); ok {
+		for _, item := range configsArray {
+			if configMap, ok := item.(map[string]interface{}); ok {
+				configID, _ := configMap["config_id"].(string)
+				if configID == *speakerGroupInfo.TTSConfigID {
+					// 找到匹配的配置，解析完整信息
+					ttsItem := &types.TtsConfigItem{
+						ConfigID: configID,
+					}
+					if name, ok := configMap["name"].(string); ok {
+						ttsItem.Name = name
+					}
+					if provider, ok := configMap["provider"].(string); ok {
+						ttsItem.Provider = provider
+					}
+					if isDefault, ok := configMap["is_default"].(bool); ok {
+						ttsItem.IsDefault = isDefault
+					}
+					if config, ok := configMap["config"].(map[string]interface{}); ok {
+						ttsItem.Config = config
+					} else {
+						ttsItem.Config = make(map[string]interface{})
+					}
+					targetTTSConfig = ttsItem
+					break
+				}
+			}
+		}
+	}
+
+	if targetTTSConfig == nil {
+		return fmt.Errorf("未找到TTS配置 %s", *speakerGroupInfo.TTSConfigID)
+	}
+
+	// 5. 复制TTS配置以避免修改原始配置
+	ttsConfig := make(map[string]interface{})
+	for k, v := range targetTTSConfig.Config {
+		ttsConfig[k] = v
+	}
+
+	// 6. 如果配置了音色值，覆盖到TTS配置中
+	if speakerGroupInfo.Voice != nil && *speakerGroupInfo.Voice != "" {
+		// 根据provider设置对应的音色字段
+		if targetTTSConfig.Provider == "cosyvoice" {
+			ttsConfig["spk_id"] = *speakerGroupInfo.Voice
+		} else {
+			ttsConfig["voice"] = *speakerGroupInfo.Voice
+		}
+		log.Debugf("为说话人 %s 设置音色: %s", speakerResult.SpeakerName, *speakerGroupInfo.Voice)
+	}
+
+	// 7. 创建新的TTS Provider
+	newTTSProvider, err := tts.GetTTSProvider(targetTTSConfig.Provider, ttsConfig)
+	if err != nil {
+		return fmt.Errorf("创建TTS提供者失败: %v", err)
+	}
+
+	// 8. 保存到声纹TTS Provider（优先使用）
+	s.clientState.SpeakerTTSProvider = newTTSProvider
+
+	log.Infof("✅ 为说话人 %s 切换TTS成功 - Provider: %s, ConfigID: %s, Voice: %v",
+		speakerResult.SpeakerName,
+		targetTTSConfig.Provider,
+		targetTTSConfig.ConfigID,
+		speakerGroupInfo.Voice)
+
 	return nil
 }

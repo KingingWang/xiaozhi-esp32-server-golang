@@ -74,6 +74,8 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 				Prompt      string   `json:"prompt"`
 				Description string   `json:"description"`
 				Uuids       []string `json:"uuids"`
+				TTSConfigID *string  `json:"tts_config_id"`
+				Voice       *string  `json:"voice"`
 			} `json:"voice_identify"`
 			Prompt  string `json:"prompt"`
 			AgentId string `json:"agent_id"`
@@ -118,6 +120,8 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 				Prompt:      groupInfo.Prompt,
 				Description: groupInfo.Description,
 				Uuids:       groupInfo.Uuids,
+				TTSConfigID: groupInfo.TTSConfigID,
+				Voice:       groupInfo.Voice,
 			}
 			voiceIdentifyData[groupName] = groupData
 		}

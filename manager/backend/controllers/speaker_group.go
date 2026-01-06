@@ -63,10 +63,12 @@ func (sgc *SpeakerGroupController) CreateSpeakerGroup(c *gin.Context) {
 	}
 
 	var req struct {
-		AgentID     uint   `json:"agent_id" binding:"required"`
-		Name        string `json:"name" binding:"required,min=1,max=100"`
-		Prompt      string `json:"prompt"`
-		Description string `json:"description"`
+		AgentID     uint    `json:"agent_id" binding:"required"`
+		Name        string  `json:"name" binding:"required,min=1,max=100"`
+		Prompt      string  `json:"prompt"`
+		Description string  `json:"description"`
+		TTSConfigID *string `json:"tts_config_id"`
+		Voice       *string `json:"voice"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -102,6 +104,8 @@ func (sgc *SpeakerGroupController) CreateSpeakerGroup(c *gin.Context) {
 		Name:        req.Name,
 		Prompt:      req.Prompt,
 		Description: req.Description,
+		TTSConfigID: req.TTSConfigID,
+		Voice:       req.Voice,
 		Status:      "active",
 		SampleCount: 0,
 	}
@@ -286,10 +290,12 @@ func (sgc *SpeakerGroupController) UpdateSpeakerGroup(c *gin.Context) {
 	}
 
 	var req struct {
-		AgentID     *uint  `json:"agent_id"`
-		Name        string `json:"name"`
-		Prompt      string `json:"prompt"`
-		Description string `json:"description"`
+		AgentID     *uint   `json:"agent_id"`
+		Name        string  `json:"name"`
+		Prompt      string  `json:"prompt"`
+		Description string  `json:"description"`
+		TTSConfigID *string `json:"tts_config_id"`
+		Voice       *string `json:"voice"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -339,6 +345,8 @@ func (sgc *SpeakerGroupController) UpdateSpeakerGroup(c *gin.Context) {
 		speakerGroup.Prompt = req.Prompt
 	}
 	speakerGroup.Description = req.Description // 允许清空描述
+	speakerGroup.TTSConfigID = req.TTSConfigID
+	speakerGroup.Voice = req.Voice
 
 	if err := sgc.DB.Save(&speakerGroup).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新声纹组失败"})
