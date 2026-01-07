@@ -188,6 +188,6 @@ func (c *ChatManager) InjectMessage(message string, skipLlm bool) error {
 		return c.session.AddTextToTTSQueue(message)
 	} else {
 		// 通过LLM处理消息
-		return c.session.AddAsrResultToQueue(message)
+		return c.session.AddAsrResultToQueue(message, nil)
 	}
 }

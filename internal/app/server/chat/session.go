@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -21,20 +22,23 @@ import (
 	"xiaozhi-esp32-server-golang/internal/data/history"
 	. "xiaozhi-esp32-server-golang/internal/data/msg"
 	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
+	"xiaozhi-esp32-server-golang/internal/domain/config/types"
 	"xiaozhi-esp32-server-golang/internal/domain/eventbus"
 	"xiaozhi-esp32-server-golang/internal/domain/llm"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
 	"xiaozhi-esp32-server-golang/internal/domain/mcp"
 	"xiaozhi-esp32-server-golang/internal/domain/memory"
 	"xiaozhi-esp32-server-golang/internal/domain/memory/llm_memory"
+	"xiaozhi-esp32-server-golang/internal/domain/speaker"
 	"xiaozhi-esp32-server-golang/internal/domain/tts"
 	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
 )
 
 type AsrResponseChannelItem struct {
-	ctx  context.Context
-	text string
+	ctx           context.Context
+	text          string
+	speakerResult *speaker.IdentifyResult
 }
 
 type ChatSession struct {
@@ -42,29 +46,134 @@ type ChatSession struct {
 	asrManager      *ASRManager
 	ttsManager      *TTSManager
 	llmManager      *LLMManager
+	speakerManager  *SpeakerManager
 	serverTransport *ServerTransport
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	chatTextQueue *util.Queue[AsrResponseChannelItem]
+
+	// 声纹识别结果暂存（带锁保护）
+	speakerResultMu      sync.RWMutex
+	pendingSpeakerResult *speaker.IdentifyResult
+	speakerResultReady   chan struct{} // 仅用于通知就绪，不传数据
 }
 
 type ChatSessionOption func(*ChatSession)
 
 func NewChatSession(clientState *ClientState, serverTransport *ServerTransport, opts ...ChatSessionOption) *ChatSession {
 	s := &ChatSession{
-		clientState:     clientState,
-		serverTransport: serverTransport,
-		chatTextQueue:   util.NewQueue[AsrResponseChannelItem](10),
+		clientState:        clientState,
+		serverTransport:    serverTransport,
+		chatTextQueue:      util.NewQueue[AsrResponseChannelItem](10),
+		speakerResultReady: make(chan struct{}, 1), // 缓冲为1，避免阻塞
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
 
 	s.asrManager = NewASRManager(clientState, serverTransport)
+	s.asrManager.session = s // 设置 session 引用
 	s.ttsManager = NewTTSManager(clientState, serverTransport)
 	s.llmManager = NewLLMManager(clientState, serverTransport, s.ttsManager)
+
+	// 如果启用声纹识别，创建声纹管理器
+	if clientState.IsSpeakerEnabled() {
+		// 从系统配置（viper）获取声纹服务地址
+		baseURL := viper.GetString("voice_identify.base_url")
+		if baseURL != "" {
+			// 设置服务地址和阈值到配置中
+			speakerConfig := map[string]interface{}{
+				"base_url": baseURL,
+			}
+			// 读取阈值配置，如果未配置则使用默认值 0.6
+			if viper.IsSet("voice_identify.threshold") {
+				threshold := viper.GetFloat64("voice_identify.threshold")
+				speakerConfig["threshold"] = threshold
+			}
+
+			provider, err := speaker.GetSpeakerProvider(speakerConfig)
+			if err != nil {
+				log.Warnf("创建声纹识别提供者失败: %v", err)
+			} else {
+				clientState.SpeakerProvider = provider
+				s.speakerManager = NewSpeakerManager(provider)
+				log.Debugf("设备 %s 启用声纹识别", clientState.DeviceID)
+
+				// 设置异步获取声纹结果的回调
+				clientState.OnVoiceSilenceSpeakerCallback = func(ctx context.Context) {
+					log.Debugf("[声纹识别] OnVoiceSilenceSpeakerCallback 被调用, deviceID: %s", clientState.DeviceID)
+
+					// 异步获取声纹结果
+					go func() {
+						log.Debugf("[声纹识别] 开始异步获取声纹识别结果, deviceID: %s", clientState.DeviceID)
+
+						// 检查 speakerManager 是否激活
+						if !s.speakerManager.IsActive() {
+							//log.Warnf("[声纹识别] speakerManager 未激活，无法获取识别结果")
+							return
+						}
+						// 清空之前的结果
+						s.speakerResultMu.Lock()
+						oldResult := s.pendingSpeakerResult
+						s.pendingSpeakerResult = nil
+						s.speakerResultMu.Unlock()
+						if oldResult != nil {
+							log.Debugf("[声纹识别] 清空之前的识别结果: identified=%v, speaker_id=%s", oldResult.Identified, oldResult.SpeakerID)
+						}
+
+						// 清空就绪通知（非阻塞）
+						select {
+						case <-s.speakerResultReady:
+							log.Debugf("[声纹识别] 清空就绪通知通道")
+						default:
+							log.Debugf("[声纹识别] 就绪通知通道已为空")
+						}
+
+						result, err := s.speakerManager.FinishAndIdentify(ctx)
+						if err != nil {
+							log.Warnf("[声纹识别] 获取声纹识别结果失败: %v, deviceID: %s", err, clientState.DeviceID)
+							// 声纹识别失败不影响主流程，存储 nil 结果
+							s.speakerResultMu.Lock()
+							s.pendingSpeakerResult = nil
+							s.speakerResultMu.Unlock()
+							log.Debugf("[声纹识别] 已存储 nil 结果（识别失败）")
+						} else if result != nil && result.Identified {
+							log.Infof("[声纹识别] 识别到说话人: %s (置信度: %.4f, 阈值: %.4f), deviceID: %s",
+								result.SpeakerName, result.Confidence, result.Threshold, clientState.DeviceID)
+							log.Debugf("[声纹识别] 识别结果详情: speaker_id=%s, speaker_name=%s, confidence=%.4f, threshold=%.4f",
+								result.SpeakerID, result.SpeakerName, result.Confidence, result.Threshold)
+							s.speakerResultMu.Lock()
+							s.pendingSpeakerResult = result
+							s.speakerResultMu.Unlock()
+							log.Debugf("[声纹识别] 已存储识别结果（已识别）")
+						} else {
+							// 未识别到说话人，也存储结果
+							if result != nil {
+								log.Debugf("[声纹识别] 未识别到说话人: identified=%v, confidence=%.4f, threshold=%.4f, deviceID: %s",
+									result.Identified, result.Confidence, result.Threshold, clientState.DeviceID)
+							} else {
+								log.Debugf("[声纹识别] 识别结果为 nil, deviceID: %s", clientState.DeviceID)
+							}
+							s.speakerResultMu.Lock()
+							s.pendingSpeakerResult = result
+							s.speakerResultMu.Unlock()
+							log.Debugf("[声纹识别] 已存储识别结果（未识别）")
+						}
+
+						// 通知结果就绪
+						select {
+						case s.speakerResultReady <- struct{}{}:
+							log.Debugf("[声纹识别] 已发送结果就绪通知, deviceID: %s", clientState.DeviceID)
+						default:
+							log.Warnf("[声纹识别] 结果就绪通知通道已满，无法发送通知, deviceID: %s", clientState.DeviceID)
+						}
+					}()
+				}
+			}
+		}
+	}
 
 	return s
 }
@@ -472,7 +581,7 @@ func (s *ChatSession) HandleListenDetect(msg *ClientMessage) error {
 			} else {
 				s.clientState.Destroy()
 				//进行llm->tts聊天
-				if err := s.AddAsrResultToQueue(text); err != nil {
+				if err := s.AddAsrResultToQueue(text, nil); err != nil {
 					log.Errorf("开始对话失败: %v", err)
 				}
 			}
@@ -754,7 +863,7 @@ func (s *ChatSession) OnListenStart() error {
 				// 重置重试计数器
 				startIdleTime = time.Now().Unix()
 
-				//当获取到asr结果时, 结束语音输入
+				//当获取到asr结果时, 结束语音输入（OnVoiceSilence 中会异步获取声纹结果）
 				s.clientState.OnVoiceSilence()
 
 				//发送asr消息
@@ -765,7 +874,30 @@ func (s *ChatSession) OnListenStart() error {
 					return
 				}
 
-				err = s.AddAsrResultToQueue(text)
+				// 获取暂存的声纹结果（带超时）
+				var speakerResult *speaker.IdentifyResult
+				if s.speakerManager != nil {
+					log.Debugf("s.speakerManager: %+v, IsActive: %+v", s.speakerManager, s.speakerManager.IsActive())
+
+					timeout := time.NewTimer(200 * time.Millisecond)
+					select {
+					case <-s.speakerResultReady:
+						timeout.Stop()
+						s.speakerResultMu.RLock()
+						speakerResult = s.pendingSpeakerResult
+						s.speakerResultMu.RUnlock()
+					case <-timeout.C:
+						// 超时后读取当前结果（可能为 nil）
+						s.speakerResultMu.RLock()
+						speakerResult = s.pendingSpeakerResult
+						s.speakerResultMu.RUnlock()
+						log.Debugf("获取声纹识别结果超时，使用当前结果")
+					}
+					timeout.Stop()
+					log.Debugf("获取声纹识别结果: %+v", speakerResult)
+				}
+
+				err = s.AddAsrResultToQueue(text, speakerResult)
 				if err != nil {
 					log.Errorf("开始对话失败: %v", err)
 					s.Close()
@@ -815,12 +947,16 @@ func (s *ChatSession) OnListenStart() error {
 }
 
 // startChat 开始对话
-func (s *ChatSession) AddAsrResultToQueue(text string) error {
+func (s *ChatSession) AddAsrResultToQueue(text string, speakerResult *speaker.IdentifyResult) error {
 	log.Debugf("AddAsrResultToQueue text: %s", text)
+	if speakerResult != nil && speakerResult.Identified {
+		log.Debugf("AddAsrResultToQueue speaker: %s (confidence: %.2f)", speakerResult.SpeakerName, speakerResult.Confidence)
+	}
 	sessionCtx := s.clientState.SessionCtx.Get(s.clientState.Ctx)
 	item := AsrResponseChannelItem{
-		ctx:  s.clientState.AfterAsrSessionCtx.Get(sessionCtx),
-		text: text,
+		ctx:           s.clientState.AfterAsrSessionCtx.Get(sessionCtx),
+		text:          text,
+		speakerResult: speakerResult,
 	}
 	err := s.chatTextQueue.Push(item)
 	if err != nil {
@@ -842,7 +978,7 @@ func (s *ChatSession) processChatText(ctx context.Context) {
 			continue
 		}
 
-		err = s.actionDoChat(item.ctx, item.text)
+		err = s.actionDoChat(item.ctx, item.text, item.speakerResult)
 		if err != nil {
 			log.Errorf("处理对话失败: %v", err)
 			continue
@@ -875,6 +1011,10 @@ func (s *ChatSession) Close() {
 	// 取消会话级别的上下文
 	s.cancel()
 
+	if s.speakerManager != nil {
+		s.speakerManager.Close()
+	}
+
 	if s.clientState != nil {
 		eventbus.Get().Publish(eventbus.TopicSessionEnd, s.clientState)
 	}
@@ -882,7 +1022,7 @@ func (s *ChatSession) Close() {
 	log.Debugf("ChatSession.Close() 会话资源清理完成, 设备 %s", deviceID)
 }
 
-func (s *ChatSession) actionDoChat(ctx context.Context, text string) error {
+func (s *ChatSession) actionDoChat(ctx context.Context, text string, speakerResult *speaker.IdentifyResult) error {
 	select {
 	case <-ctx.Done():
 		log.Debugf("actionDoChat ctx done, return")
@@ -903,6 +1043,12 @@ func (s *ChatSession) actionDoChat(ctx context.Context, text string) error {
 	clientState := s.clientState
 
 	sessionID := clientState.SessionID
+
+	// 声纹识别后动态切换TTS（未识别到时恢复默认TTS）
+	if err := s.switchTTSForSpeaker(speakerResult); err != nil {
+		log.Warnf("切换TTS失败: %v", err)
+		// 不中断流程，继续使用当前TTS
+	}
 
 	// 直接创建Eino原生消息
 	userMessage := &schema.Message{
@@ -938,10 +1084,112 @@ func (s *ChatSession) actionDoChat(ctx context.Context, text string) error {
 	// 发送带工具的LLM请求
 	log.Infof("使用 %d 个MCP工具发送LLM请求, tools: %+v", len(einoTools), toolNameList)
 
-	err = s.llmManager.DoLLmRequest(ctx, userMessage, einoTools, true)
+	err = s.llmManager.DoLLmRequest(ctx, userMessage, einoTools, true, speakerResult)
 	if err != nil {
 		log.Errorf("发送带工具的 LLM 请求失败, seesionID: %s, error: %v", sessionID, err)
 		return fmt.Errorf("发送带工具的 LLM 请求失败: %v", err)
 	}
+	return nil
+}
+
+// switchTTSForSpeaker 为识别的说话人切换TTS
+func (s *ChatSession) switchTTSForSpeaker(speakerResult *speaker.IdentifyResult) error {
+	s.clientState.SpeakerTTSProvider = nil
+
+	// 1. 检查 speakerResult 是否为 nil
+	if speakerResult == nil {
+		log.Debug("speakerResult 为 nil，清空声纹TTS Provider")
+		return nil
+	}
+
+	// 2. 查找声纹组配置
+	speakerGroupInfo, found := s.clientState.DeviceConfig.VoiceIdentify[speakerResult.SpeakerName]
+	if !found {
+		// 未找到配置，清空声纹TTS Provider
+		log.Debugf("未找到声纹组 %s 的配置，清空声纹TTS Provider", speakerResult.SpeakerName)
+		return nil
+	}
+
+	// 3. 检查是否配置了自定义音色
+	if speakerGroupInfo.TTSConfigID == nil || *speakerGroupInfo.TTSConfigID == "" {
+		// 未配置自定义音色，清空声纹TTS Provider
+		log.Debugf("声纹组 %s 未配置自定义TTS，清空声纹TTS Provider", speakerResult.SpeakerName)
+		return nil
+	}
+
+	// 4. 从系统配置（viper）中查找对应的TTS配置
+	var targetTTSConfig *types.TtsConfigItem
+	allTTSConfigsRaw := viper.Get("all_tts_configs")
+	if allTTSConfigsRaw == nil {
+		return fmt.Errorf("系统配置中未找到 all_tts_configs")
+	}
+
+	// 解析 all_tts_configs
+	if configsArray, ok := allTTSConfigsRaw.([]interface{}); ok {
+		for _, item := range configsArray {
+			if configMap, ok := item.(map[string]interface{}); ok {
+				configID, _ := configMap["config_id"].(string)
+				if configID == *speakerGroupInfo.TTSConfigID {
+					// 找到匹配的配置，解析完整信息
+					ttsItem := &types.TtsConfigItem{
+						ConfigID: configID,
+					}
+					if name, ok := configMap["name"].(string); ok {
+						ttsItem.Name = name
+					}
+					if provider, ok := configMap["provider"].(string); ok {
+						ttsItem.Provider = provider
+					}
+					if isDefault, ok := configMap["is_default"].(bool); ok {
+						ttsItem.IsDefault = isDefault
+					}
+					if config, ok := configMap["config"].(map[string]interface{}); ok {
+						ttsItem.Config = config
+					} else {
+						ttsItem.Config = make(map[string]interface{})
+					}
+					targetTTSConfig = ttsItem
+					break
+				}
+			}
+		}
+	}
+
+	if targetTTSConfig == nil {
+		return fmt.Errorf("未找到TTS配置 %s", *speakerGroupInfo.TTSConfigID)
+	}
+
+	// 5. 复制TTS配置以避免修改原始配置
+	ttsConfig := make(map[string]interface{})
+	for k, v := range targetTTSConfig.Config {
+		ttsConfig[k] = v
+	}
+
+	// 6. 如果配置了音色值，覆盖到TTS配置中
+	if speakerGroupInfo.Voice != nil && *speakerGroupInfo.Voice != "" {
+		// 根据provider设置对应的音色字段
+		if targetTTSConfig.Provider == "cosyvoice" {
+			ttsConfig["spk_id"] = *speakerGroupInfo.Voice
+		} else {
+			ttsConfig["voice"] = *speakerGroupInfo.Voice
+		}
+		log.Debugf("为说话人 %s 设置音色: %s", speakerResult.SpeakerName, *speakerGroupInfo.Voice)
+	}
+
+	// 7. 创建新的TTS Provider
+	newTTSProvider, err := tts.GetTTSProvider(targetTTSConfig.Provider, ttsConfig)
+	if err != nil {
+		return fmt.Errorf("创建TTS提供者失败: %v", err)
+	}
+
+	// 8. 保存到声纹TTS Provider（优先使用）
+	s.clientState.SpeakerTTSProvider = newTTSProvider
+
+	log.Infof("✅ 为说话人 %s 切换TTS成功 - Provider: %s, ConfigID: %s, Voice: %v",
+		speakerResult.SpeakerName,
+		targetTTSConfig.Provider,
+		targetTTSConfig.ConfigID,
+		speakerGroupInfo.Voice)
+
 	return nil
 }

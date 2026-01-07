@@ -10,7 +10,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func Setup(db *gorm.DB) *gin.Engine {
+func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	r := gin.Default()
 
 	// CORS配置
@@ -27,9 +27,10 @@ func Setup(db *gorm.DB) *gin.Engine {
 	userController := &controllers.UserController{DB: db, WebSocketController: webSocketController}
 	deviceActivationController := &controllers.DeviceActivationController{DB: db}
 	setupController := &controllers.SetupController{DB: db}
+	speakerGroupController := controllers.NewSpeakerGroupController(db, cfg)
 
 	// 初始化聊天历史控制器（需要配置）
-	cfg := config.Load()
+	cfg = config.Load()
 	audioBasePath := "./storage/chat_history/audio"
 	maxFileSize := int64(10 * 1024 * 1024) // 默认10MB
 	if cfg.History.AudioBasePath != "" {
@@ -107,6 +108,20 @@ func Setup(db *gorm.DB) *gin.Engine {
 				// 消息注入
 				user.POST("/devices/inject-message", userController.InjectMessage)
 
+				// 声纹组管理
+				user.POST("/speaker-groups", speakerGroupController.CreateSpeakerGroup)
+				user.GET("/speaker-groups", speakerGroupController.GetSpeakerGroups)
+				user.GET("/speaker-groups/:id", speakerGroupController.GetSpeakerGroup)
+				user.PUT("/speaker-groups/:id", speakerGroupController.UpdateSpeakerGroup)
+				user.DELETE("/speaker-groups/:id", speakerGroupController.DeleteSpeakerGroup)
+				user.POST("/speaker-groups/:id/verify", speakerGroupController.VerifySpeakerGroup)
+
+				// 声纹样本管理（注意：使用 :id 而不是 :group_id，避免路由冲突）
+				user.POST("/speaker-groups/:id/samples", speakerGroupController.AddSample)
+				user.GET("/speaker-groups/:id/samples", speakerGroupController.GetSamples)
+				user.GET("/speaker-groups/:id/samples/:sample_id/file", speakerGroupController.GetSampleFile)
+				user.DELETE("/speaker-groups/:id/samples/:sample_id", speakerGroupController.DeleteSample)
+
 				// 聊天历史
 				user.GET("/history/messages", chatHistoryController.GetMessages)
 				user.DELETE("/history/messages/:id", chatHistoryController.DeleteMessage)
@@ -147,6 +162,11 @@ func Setup(db *gorm.DB) *gin.Engine {
 				admin.POST("/tts-configs", adminController.CreateTTSConfig)
 				admin.PUT("/tts-configs/:id", adminController.UpdateTTSConfig)
 				admin.DELETE("/tts-configs/:id", adminController.DeleteTTSConfig)
+
+				admin.GET("/speaker-configs", adminController.GetSpeakerConfigs)
+				admin.POST("/speaker-configs", adminController.CreateSpeakerConfig)
+				admin.PUT("/speaker-configs/:id", adminController.UpdateSpeakerConfig)
+				admin.DELETE("/speaker-configs/:id", adminController.DeleteSpeakerConfig)
 
 				admin.GET("/vision-configs", adminController.GetVisionConfigs)
 				admin.POST("/vision-configs", adminController.CreateVisionConfig)

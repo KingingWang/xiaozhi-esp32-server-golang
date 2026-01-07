@@ -27,6 +27,11 @@
           <span>智能体管理</span>
         </el-menu-item>
         
+        <el-menu-item v-if="!authStore.isAdmin" index="/speakers">
+          <el-icon><Microphone /></el-icon>
+          <span>声纹管理</span>
+        </el-menu-item>
+        
         <!-- 服务配置 -->
         <el-sub-menu v-if="authStore.isAdmin" index="/admin/service-config">
           <template #title>
@@ -38,6 +43,7 @@
           <el-menu-item index="/admin/mqtt-server-config">MQTT Server配置</el-menu-item>
           <el-menu-item index="/admin/udp-config">UDP配置</el-menu-item>
           <el-menu-item index="/admin/mcp-config">MCP配置</el-menu-item>
+          <el-menu-item index="/admin/speaker-config">声纹识别配置</el-menu-item>
         </el-sub-menu>
         
         <!-- AI配置 -->
@@ -120,7 +126,8 @@ import {
   Cpu,
   UserFilled,
   Iphone,
-  Connection
+  Connection,
+  Microphone
 } from '@element-plus/icons-vue'
 
 const router = useRouter()

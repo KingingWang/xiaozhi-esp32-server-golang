@@ -257,13 +257,29 @@ func runClient(serverAddr, deviceID, audioFile string) error {
 	// 等待接收服务器响应
 	time.Sleep(1 * time.Second)
 
-	fmt.Println("开始发送音频数据...")
+	// 如果指定了音频文件，则发送音频文件
+	if audioFile != "" {
+		// 发送 listen start auto 信令
+		if err := sendListenStart(conn, deviceID, "auto"); err != nil {
+			return fmt.Errorf("发送listen start消息失败: %v", err)
+		}
+		fmt.Println("已发送 listen start auto 信令")
 
-	// 读取并发送音频文件（使用Opus编码）
-	/*if err := sendWavFileWithOpusEncoding(conn, audioFile); err != nil {
-		return fmt.Errorf("发送音频数据失败: %v\n", err)
-	}*/
+		// 等待一小段时间，确保服务器准备好接收音频
+		time.Sleep(100 * time.Millisecond)
 
+		fmt.Println("开始发送音频数据...")
+		// 读取并发送音频文件（使用Opus编码）
+		if err := sendWavFileWithOpusEncoding(conn, audioFile); err != nil {
+			return fmt.Errorf("发送音频数据失败: %v\n", err)
+		}
+		fmt.Println("音频数据发送完成，等待服务器响应...")
+		// 等待10秒后退出
+		time.Sleep(10 * time.Second)
+		return nil
+	}
+
+	// 如果没有指定音频文件，则使用TTS模式
 	waitInput <- struct{}{}
 	if err := sendTextToSpeech(conn, deviceID); err != nil {
 		return fmt.Errorf("发送文本到语音失败: %v", err)
@@ -417,17 +433,29 @@ func sendWavFileWithOpusEncoding(conn *websocket.Conn, filePath string) error {
 			return fmt.Errorf("发送Opus帧失败: %v", err)
 		}
 		// 控制发送速率，模拟实时音频流
-		//time.Sleep(60 * time.Millisecond)
+		time.Sleep(time.Duration(FrameDurationMs) * time.Millisecond)
 	}
 
-	//持续发送空的音频数据
-	emptyFrame := make([]byte, 50)
-	for {
-		if err := conn.WriteMessage(websocket.BinaryMessage, emptyFrame); err != nil {
-			return fmt.Errorf("发送空音频数据失败: %v", err)
-		}
-		time.Sleep(50 * time.Millisecond)
+	// 发送200ms静音音频数据
+	silenceDurationMs := 1000
+	silenceFrameCount := silenceDurationMs / FrameDurationMs
+	fmt.Printf("开始发送 %dms 静音音频数据，共 %d 帧\n", silenceDurationMs, silenceFrameCount)
+
+	// 生成静音Opus数据
+	emptyOpusData := genEmptyOpusData(SampleRate, Channels, FrameDurationMs, 1)
+	if emptyOpusData == nil {
+		return fmt.Errorf("生成静音Opus数据失败")
 	}
+
+	// 循环发送静音帧
+	for i := 0; i < silenceFrameCount; i++ {
+		if err := conn.WriteMessage(websocket.BinaryMessage, emptyOpusData); err != nil {
+			return fmt.Errorf("发送静音Opus帧失败: %v", err)
+		}
+		// 控制发送速率，模拟实时音频流
+		time.Sleep(time.Duration(FrameDurationMs) * time.Millisecond)
+	}
+	fmt.Printf("静音音频数据发送完成\n")
 
 	return nil
 }

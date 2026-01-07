@@ -8,10 +8,12 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `json:"server"`
-	Database DatabaseConfig `json:"database"`
-	JWT      JWTConfig      `json:"jwt"`
-	History  HistoryConfig  `json:"history"`
+	Server         ServerConfig         `json:"server"`
+	Database       DatabaseConfig       `json:"database"`
+	JWT            JWTConfig            `json:"jwt"`
+	SpeakerService SpeakerServiceConfig `json:"speaker_service"`
+	Storage        StorageConfig        `json:"storage"`
+	History        HistoryConfig        `json:"history"`
 }
 
 type ServerConfig struct {
@@ -30,6 +32,15 @@ type DatabaseConfig struct {
 type JWTConfig struct {
 	Secret     string `json:"secret"`
 	ExpireHour int    `json:"expire_hour"`
+}
+
+type SpeakerServiceConfig struct {
+	URL string `json:"url"` // asr_server 的服务地址
+}
+
+type StorageConfig struct {
+	SpeakerAudioPath string `json:"speaker_audio_path"` // 音频文件存储路径
+	MaxFileSize      int64  `json:"max_file_size"`      // 最大文件大小（字节），默认10MB
 }
 
 type HistoryConfig struct {
@@ -62,6 +73,10 @@ func LoadWithPath(configPath string) *Config {
 		config.Database.Database = database
 	}
 
+	// 优先使用环境变量覆盖声纹服务配置
+	if serviceURL := os.Getenv("SPEAKER_SERVICE_URL"); serviceURL != "" {
+		config.SpeakerService.URL = serviceURL
+	}
 	// 优先使用环境变量覆盖音频存储路径
 	if audioBasePath := os.Getenv("AUDIO_BASE_PATH"); audioBasePath != "" {
 		config.History.AudioBasePath = audioBasePath

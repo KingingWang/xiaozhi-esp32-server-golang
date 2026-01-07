@@ -71,6 +71,12 @@ const routes = [
             meta: { title: 'TTS配置管理' }
           },
           {
+            path: 'speaker-config',
+            name: 'SpeakerConfig',
+            component: () => import('../views/admin/SpeakerConfig.vue'),
+            meta: { title: '声纹识别配置管理' }
+          },
+          {
             path: 'ota-config',
             name: 'OTAConfig',
             component: () => import('../views/admin/OTAConfig.vue'),
@@ -174,6 +180,18 @@ const routes = [
         name: 'AgentDevices',
         component: () => import('../views/user/AgentDevices.vue'),
         meta: { title: '智能体设备管理' }
+      },
+      {
+        path: '/speakers',
+        name: 'Speakers',
+        component: () => import('../views/user/Speakers.vue'),
+        meta: { title: '声纹管理' }
+      },
+      {
+        path: '/user/speakers',
+        name: 'UserSpeakers',
+        component: () => import('../views/user/Speakers.vue'),
+        meta: { title: '声纹管理' }
       },
       {
         path: '/user/agents/:id/history',

@@ -16,12 +16,14 @@ type ASRManagerOption func(*ASRManager)
 type ASRManager struct {
 	clientState     *ClientState
 	serverTransport *ServerTransport
+	session         *ChatSession // 用于访问 speakerManager
 }
 
 func NewASRManager(clientState *ClientState, serverTransport *ServerTransport, opts ...ASRManagerOption) *ASRManager {
 	asr := &ASRManager{
 		clientState:     clientState,
 		serverTransport: serverTransport,
+		session:         nil, // 稍后通过 SetSession 设置
 	}
 	for _, opt := range opts {
 		opt(asr)
@@ -111,8 +113,9 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 						}
 						//首次触发识别到语音时,为了语音数据完整性 将vadPcmData赋值给pcmData, 之后的音频数据全部进入asr
 						if haveVoice && !clientHaveVoice {
-							//首次获取全部pcm数据送入asr
-							pcmData = state.AsrAudioBuffer.GetAndClearAllData()
+							//首次检测到语音时，最多只保留200ms的前静音数据
+							allData := state.AsrAudioBuffer.GetAndClearAllData()
+							pcmData = allData
 						}
 					}
 					//log.Debugf("isVad, pcmData len: %d, vadPcmData len: %d, haveVoice: %v", len(pcmData), len(vadPcmData), haveVoice)
@@ -153,9 +156,10 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 					//如果之前没有语音, 本次也没有语音, 则从缓存中删除
 					if !clientHaveVoice {
 						//保留近10帧
-						if state.AsrAudioBuffer.GetFrameCount() > vadNeedGetCount*3 {
-							state.AsrAudioBuffer.RemoveAsrAudioData(1)
-						}
+						/*
+							if state.AsrAudioBuffer.GetFrameCount() > vadNeedGetCount*3 {
+								state.AsrAudioBuffer.RemoveAsrAudioData(1)
+							}*/
 						continue
 					}
 				}
@@ -164,6 +168,25 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 					//vad识别成功, 往asr音频通道里发送数据
 					//log.Infof("vad识别成功, 往asr音频通道里发送数据, len: %d", len(pcmData))
 					state.Asr.AddAudioData(pcmData)
+
+					// 如果启用声纹识别，同时发送到声纹识别服务
+					// 需要同时满足：全局开关启用、设备配置中有声纹组、speakerManager已初始化
+					if state.IsSpeakerEnabled() && state.HasSpeakerGroups() &&
+						a.session != nil && a.session.speakerManager != nil {
+						// 首次检测到语音时，启动流式识别
+						if !a.session.speakerManager.IsActive() {
+							sampleRate := audioFormat.SampleRate
+							agentId := a.session.clientState.AgentID
+							if err := a.session.speakerManager.StartStreaming(ctx, sampleRate, agentId); err != nil {
+								log.Warnf("启动声纹识别流失败: %v", err)
+							}
+						}
+
+						// 发送音频块
+						if err := a.session.speakerManager.SendAudioChunk(ctx, pcmData); err != nil {
+							log.Warnf("发送音频块到声纹识别服务失败: %v", err)
+						}
+					}
 				}
 
 				//已经有语音了, 但本次没有检测到语音, 则需要判断是否已经停止说话

@@ -29,6 +29,8 @@ func InitWithReset(cfg config.DatabaseConfig) *gorm.DB {
 		&models.Agent{},
 		&models.Config{},
 		&models.GlobalRole{},
+		&models.SpeakerGroup{},
+		&models.SpeakerSample{},
 	)
 	if err != nil {
 		log.Printf("删除表时出现错误（可能表不存在）: %v", err)

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -46,14 +47,25 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 	}
 
 	// 构建配置响应
+	type SpeakerGroupInfo struct {
+		ID          uint     `json:"id"`
+		Name        string   `json:"name"`
+		Prompt      string   `json:"prompt"`
+		Description string   `json:"description"`
+		Uuids       []string `json:"uuids"`
+		TTSConfigID *string  `json:"tts_config_id"`
+		Voice       *string  `json:"voice"`
+	}
+
 	type ConfigResponse struct {
-		VAD     models.Config `json:"vad"`
-		ASR     models.Config `json:"asr"`
-		LLM     models.Config `json:"llm"`
-		TTS     models.Config `json:"tts"`
-		Memory  models.Config `json:"memory"`
-		Prompt  string        `json:"prompt"`
-		AgentID string        `json:"agent_id"`
+		VAD           models.Config               `json:"vad"`
+		ASR           models.Config               `json:"asr"`
+		LLM           models.Config               `json:"llm"`
+		TTS           models.Config               `json:"tts"`
+		Memory        models.Config               `json:"memory"`
+		VoiceIdentify map[string]SpeakerGroupInfo `json:"voice_identify"`
+		Prompt        string                      `json:"prompt"`
+		AgentID       string                      `json:"agent_id"`
 	}
 
 	var response ConfigResponse
@@ -178,14 +190,47 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 		//return
 	}
 
+	// 获取VoiceIdentify配置：检查智能体是否关联了声纹组
+	response.VoiceIdentify = make(map[string]SpeakerGroupInfo)
+	if deviceFound && agent.ID != 0 {
+		var speakerGroups []models.SpeakerGroup
+		if err := ac.DB.Where("agent_id = ? AND status = ?", agent.ID, "active").
+			Order("created_at DESC").Find(&speakerGroups).Error; err == nil && len(speakerGroups) > 0 {
+			// 遍历所有声纹组
+			for _, speakerGroup := range speakerGroups {
+				// 查询该声纹组下的所有样本
+				var samples []models.SpeakerSample
+				ac.DB.Where("speaker_group_id = ? AND status = ?", speakerGroup.ID, "active").
+					Find(&samples)
+
+				// 提取样本 UUID 列表
+				uuids := make([]string, 0)
+				for _, sample := range samples {
+					uuids = append(uuids, sample.UUID)
+				}
+
+				// 以声纹组名称为 key，构建配置数据
+				response.VoiceIdentify[speakerGroup.Name] = SpeakerGroupInfo{
+					ID:          speakerGroup.ID,
+					Name:        speakerGroup.Name,
+					Prompt:      speakerGroup.Prompt,
+					Description: speakerGroup.Description,
+					Uuids:       uuids,
+					TTSConfigID: speakerGroup.TTSConfigID,
+					Voice:       speakerGroup.Voice,
+				}
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"data": response})
 }
 
-// GetSystemConfigs 获取系统配置信息，包括mqtt, mqtt_server, udp, ota, mcp, local_mcp
+// GetSystemConfigs 获取系统配置信息，包括mqtt, mqtt_server, udp, ota, mcp, local_mcp, voice_identify, tts
 func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 	// 一次性获取所有相关配置（包括启用和未启用的）
 	var allConfigs []models.Config
-	if err := ac.DB.Where("type IN (?)", []string{"mqtt", "mqtt_server", "udp", "ota", "mcp", "local_mcp"}).Find(&allConfigs).Error; err != nil {
+	if err := ac.DB.Where("type IN (?)", []string{"mqtt", "mqtt_server", "udp", "ota", "mcp", "local_mcp", "voice_identify", "tts"}).Find(&allConfigs).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get system configs"})
 		return
 	}
@@ -367,6 +412,85 @@ func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 	// 处理独立的local_mcp配置（如果存在）
 	if configs, exists := configsByType["local_mcp"]; exists && len(configs) > 0 {
 		response["local_mcp"] = selectAndParseConfig(configs)
+	}
+
+	// 处理 voice_identify 配置（与控制台配置结构一致，包含 base_url、threshold 和 enabled）
+	// 优先使用环境变量 SPEAKER_SERVICE_URL，如果未定义则从数据库配置获取
+	baseURL := os.Getenv("SPEAKER_SERVICE_URL")
+	enabled := false // 默认启用
+	threshold := 0.6 // 默认阈值
+
+	// 从数据库配置获取 base_url、threshold 和 enabled 状态
+	if configs, exists := configsByType["voice_identify"]; exists && len(configs) > 0 {
+		var selectedConfig models.Config
+		// 优先选择默认配置
+		for _, config := range configs {
+			if config.IsDefault {
+				selectedConfig = config
+				break
+			}
+		}
+		// 如果没有默认配置，选择第一个配置
+		if selectedConfig.ID == 0 {
+			selectedConfig = configs[0]
+		}
+
+		// 获取 enabled 状态
+		enabled = selectedConfig.Enabled
+
+		// 如果环境变量未定义，从数据库配置获取 base_url 和 threshold
+		if baseURL == "" {
+			if selectedConfig.JsonData != "" {
+				var configData map[string]interface{}
+				if err := json.Unmarshal([]byte(selectedConfig.JsonData), &configData); err == nil {
+					// 从 service.base_url 提取 base_url，与控制台配置结构一致
+					if service, ok := configData["service"].(map[string]interface{}); ok {
+						if url, ok := service["base_url"].(string); ok && url != "" && baseURL == "" {
+							baseURL = url
+						}
+						// 读取阈值配置
+						if thresholdVal, ok := service["threshold"]; ok {
+							if thresholdFloat, ok := thresholdVal.(float64); ok {
+								// 验证阈值范围
+								if thresholdFloat >= 0 && thresholdFloat <= 1 {
+									threshold = thresholdFloat
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		// 如果获取到了 base_url，添加到响应中
+		if baseURL != "" {
+			response["voice_identify"] = gin.H{
+				"base_url":  baseURL,
+				"threshold": threshold,
+				"enable":    enabled,
+			}
+		}
+	}
+
+	// 处理 TTS 配置，返回所有启用的 TTS 配置列表
+	if ttsConfigs, exists := configsByType["tts"]; exists && len(ttsConfigs) > 0 {
+		var allTTSConfigs []gin.H
+		for _, config := range ttsConfigs {
+			if config.Enabled { // 只返回启用的配置
+				var configData map[string]interface{}
+				if config.JsonData != "" {
+					json.Unmarshal([]byte(config.JsonData), &configData)
+				}
+
+				allTTSConfigs = append(allTTSConfigs, gin.H{
+					"config_id":  config.ConfigID,
+					"name":       config.Name,
+					"provider":   config.Provider,
+					"config":     configData,
+					"is_default": config.IsDefault,
+				})
+			}
+		}
+		response["all_tts_configs"] = allTTSConfigs
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": response})
@@ -1167,6 +1291,72 @@ func (ac *AdminController) DeleteTTSConfig(c *gin.Context) {
 	ac.deleteConfigWithType(c, "tts")
 }
 
+// Speaker配置管理（兼容前端）
+func (ac *AdminController) GetSpeakerConfigs(c *gin.Context) {
+	var configs []models.Config
+	if err := ac.DB.Where("type = ?", "voice_identify").Find(&configs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get Speaker configs"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": configs})
+}
+
+func (ac *AdminController) CreateSpeakerConfig(c *gin.Context) {
+	var config models.Config
+	if err := c.ShouldBindJSON(&config); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	config.Type = "voice_identify"
+	// 声纹配置只有一个，自动设置为默认配置
+	config.IsDefault = true
+	// 如果已存在配置，先删除旧的
+	ac.DB.Where("type = ?", "voice_identify").Delete(&models.Config{})
+	ac.createConfigWithType(c, &config)
+}
+
+func (ac *AdminController) UpdateSpeakerConfig(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var config models.Config
+
+	if err := ac.DB.Where("id = ? AND type = ?", id, "voice_identify").First(&config).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "配置不存在"})
+		return
+	}
+
+	var updateData models.Config
+	if err := c.ShouldBindJSON(&updateData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 声纹配置只有一个，始终设置为默认配置
+	updateData.IsDefault = true
+
+	// 更新配置
+	config.Name = updateData.Name
+	config.Provider = updateData.Provider
+	config.JsonData = updateData.JsonData
+	config.Enabled = updateData.Enabled
+	config.IsDefault = updateData.IsDefault
+
+	// 如果提供了新的config_id，则更新它
+	if updateData.ConfigID != "" {
+		config.ConfigID = updateData.ConfigID
+	}
+
+	if err := ac.DB.Save(&config).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新配置失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": config})
+}
+
+func (ac *AdminController) DeleteSpeakerConfig(c *gin.Context) {
+	ac.deleteConfigWithType(c, "voice_identify")
+}
+
 // Vision配置管理（兼容前端）
 func (ac *AdminController) GetVisionConfigs(c *gin.Context) {
 	var configs []models.Config
@@ -1492,33 +1682,35 @@ func (ac *AdminController) deleteConfigWithType(c *gin.Context, configType strin
 func (ac *AdminController) ExportConfigs(c *gin.Context) {
 	// 构建导出配置结构 - 只包含实际存在的模块
 	type ExportConfig struct {
-		VAD        map[string]interface{} `yaml:"vad,omitempty"`
-		ASR        map[string]interface{} `yaml:"asr,omitempty"`
-		LLM        map[string]interface{} `yaml:"llm,omitempty"`
-		TTS        map[string]interface{} `yaml:"tts,omitempty"`
-		Vision     map[string]interface{} `yaml:"vision,omitempty"`
-		Memory     map[string]interface{} `yaml:"memory,omitempty"`
-		MQTT       map[string]interface{} `yaml:"mqtt,omitempty"`
-		MQTTServer map[string]interface{} `yaml:"mqtt_server,omitempty"`
-		UDP        map[string]interface{} `yaml:"udp,omitempty"`
-		OTA        map[string]interface{} `yaml:"ota,omitempty"`
-		MCP        map[string]interface{} `yaml:"mcp,omitempty"`
-		LocalMCP   map[string]interface{} `yaml:"local_mcp,omitempty"`
+		VAD           map[string]interface{} `yaml:"vad,omitempty"`
+		ASR           map[string]interface{} `yaml:"asr,omitempty"`
+		LLM           map[string]interface{} `yaml:"llm,omitempty"`
+		TTS           map[string]interface{} `yaml:"tts,omitempty"`
+		Vision        map[string]interface{} `yaml:"vision,omitempty"`
+		Memory        map[string]interface{} `yaml:"memory,omitempty"`
+		VoiceIdentify map[string]interface{} `yaml:"voice_identify,omitempty"`
+		MQTT          map[string]interface{} `yaml:"mqtt,omitempty"`
+		MQTTServer    map[string]interface{} `yaml:"mqtt_server,omitempty"`
+		UDP           map[string]interface{} `yaml:"udp,omitempty"`
+		OTA           map[string]interface{} `yaml:"ota,omitempty"`
+		MCP           map[string]interface{} `yaml:"mcp,omitempty"`
+		LocalMCP      map[string]interface{} `yaml:"local_mcp,omitempty"`
 	}
 
 	exportConfig := ExportConfig{
-		VAD:        make(map[string]interface{}),
-		ASR:        make(map[string]interface{}),
-		LLM:        make(map[string]interface{}),
-		TTS:        make(map[string]interface{}),
-		Vision:     make(map[string]interface{}),
-		Memory:     make(map[string]interface{}),
-		MQTT:       make(map[string]interface{}),
-		MQTTServer: make(map[string]interface{}),
-		UDP:        make(map[string]interface{}),
-		OTA:        make(map[string]interface{}),
-		MCP:        make(map[string]interface{}),
-		LocalMCP:   make(map[string]interface{}),
+		VAD:           make(map[string]interface{}),
+		ASR:           make(map[string]interface{}),
+		LLM:           make(map[string]interface{}),
+		TTS:           make(map[string]interface{}),
+		Vision:        make(map[string]interface{}),
+		Memory:        make(map[string]interface{}),
+		VoiceIdentify: make(map[string]interface{}),
+		MQTT:          make(map[string]interface{}),
+		MQTTServer:    make(map[string]interface{}),
+		UDP:           make(map[string]interface{}),
+		OTA:           make(map[string]interface{}),
+		MCP:           make(map[string]interface{}),
+		LocalMCP:      make(map[string]interface{}),
 	}
 
 	// 获取所有配置
@@ -1611,6 +1803,11 @@ func (ac *AdminController) ExportConfigs(c *gin.Context) {
 				exportConfig.Memory["provider"] = config.ConfigID
 			}
 			exportConfig.Memory[config.ConfigID] = jsonData
+		case "voice_identify":
+			if config.IsDefault {
+				exportConfig.VoiceIdentify["provider"] = config.ConfigID
+			}
+			exportConfig.VoiceIdentify[config.ConfigID] = jsonData
 		case "mcp":
 			// 处理MCP配置，将mcp和local_mcp分开
 			if mcpData, exists := jsonData["mcp"]; exists {
@@ -1730,13 +1927,88 @@ func (ac *AdminController) ImportConfigs(c *gin.Context) {
 	configTypes := []string{"vad", "asr", "llm", "tts", "memory", "ota", "mqtt", "mqtt_server", "udp", "mcp", "local_mcp"}
 	log.Printf("开始导入配置，配置类型: %v", configTypes)
 
+	// 处理 voice_identify 配置（映射到 speaker 类型）
+	if voiceIdentifyData, exists := importConfig["voice_identify"]; exists {
+		log.Printf("找到 voice_identify 配置数据")
+		if voiceIdentifyMap, ok := voiceIdentifyData.(map[string]interface{}); ok {
+			log.Printf("voice_identify 配置 map keys: %v", getMapKeys(voiceIdentifyMap))
+
+			// 获取provider字段
+			var defaultProvider string
+			if provider, exists := voiceIdentifyMap["provider"]; exists {
+				if providerStr, ok := provider.(string); ok {
+					defaultProvider = providerStr
+					log.Printf("voice_identify 默认provider: %s", defaultProvider)
+				}
+			}
+
+			log.Printf("voice_identify 配置项keys: %v", getMapKeys(voiceIdentifyMap))
+			// 声纹配置只有一个，优先使用provider指定的配置，否则使用第一个配置项
+			var targetConfigID string
+			if defaultProvider != "" {
+				targetConfigID = defaultProvider
+			} else {
+				// 如果没有provider，使用第一个非provider的配置项
+				for key := range voiceIdentifyMap {
+					if key != "provider" {
+						targetConfigID = key
+						break
+					}
+				}
+			}
+
+			if targetConfigID == "" {
+				log.Printf("voice_identify 配置中没有找到有效配置项")
+			} else {
+				// 只处理目标配置项
+				if configValue, exists := voiceIdentifyMap[targetConfigID]; exists {
+					if configMap, ok := configValue.(map[string]interface{}); ok {
+						log.Printf("处理voice_identify配置项: %s", targetConfigID)
+						jsonData, err := json.Marshal(configMap)
+						if err != nil {
+							log.Printf("序列化voice_identify配置数据失败: %v", err)
+							tx.Rollback()
+							c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal voice_identify config data"})
+							return
+						}
+
+						// 声纹配置只有一个，始终设为默认
+						config := models.Config{
+							Type:      "voice_identify",
+							Name:      "声纹识别配置",
+							ConfigID:  "asr_server",
+							Provider:  "asr_server",
+							JsonData:  string(jsonData),
+							Enabled:   true,
+							IsDefault: true,
+						}
+
+						log.Printf("准备保存voice_identify配置: Type=%s, Name=%s, ConfigID=%s", config.Type, config.Name, config.ConfigID)
+
+						// 声纹配置只有一个，先删除所有旧的配置
+						tx.Where("type = ?", "voice_identify").Delete(&models.Config{})
+
+						// 创建新配置
+						if err := tx.Create(&config).Error; err != nil {
+							log.Printf("创建voice_identify配置失败: %v", err)
+							tx.Rollback()
+							c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create voice_identify config"})
+							return
+						}
+						log.Printf("voice_identify配置创建成功: %s", targetConfigID)
+					}
+				}
+			}
+		}
+	}
+
 	for _, configType := range configTypes {
 		log.Printf("处理配置类型: %s", configType)
 		if configData, exists := importConfig[configType]; exists {
 			log.Printf("找到配置类型 %s 的数据", configType)
 			if configMap, ok := configData.(map[string]interface{}); ok {
 				// 对于需要provider的模块（vad, asr, llm, tts, memory），处理provider字段
-				if configType == "vad" || configType == "asr" || configType == "llm" || configType == "tts" || configType == "memory" {
+				if configType == "vad" || configType == "asr" || configType == "llm" || configType == "tts" || configType == "memory" || configType == "voice_identify" {
 					log.Printf("处理需要provider的配置类型: %s", configType)
 					// 获取provider字段
 					var defaultProvider string

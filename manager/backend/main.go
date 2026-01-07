@@ -30,7 +30,7 @@ func main() {
 	}
 
 	// 初始化路由
-	r := router.Setup(db)
+	r := router.Setup(db, cfg)
 
 	// 启动服务器
 	log.Printf("使用配置文件: %s", configFile)

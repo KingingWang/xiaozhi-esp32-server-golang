@@ -68,6 +68,15 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 				Provider string `json:"provider"`
 				JsonData string `json:"json_data"`
 			} `json:"memory"`
+			VoiceIdentify map[string]struct {
+				ID          uint     `json:"id"`
+				Name        string   `json:"name"`
+				Prompt      string   `json:"prompt"`
+				Description string   `json:"description"`
+				Uuids       []string `json:"uuids"`
+				TTSConfigID *string  `json:"tts_config_id"`
+				Voice       *string  `json:"voice"`
+			} `json:"voice_identify"`
 			Prompt  string `json:"prompt"`
 			AgentId string `json:"agent_id"`
 		} `json:"data"`
@@ -99,6 +108,25 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 		return data
 	}
 
+	// 从设备配置获取声纹组信息（只获取声纹组配置，不获取服务地址）
+	// VoiceIdentify 是一个 map，key 是声纹组名称，value 包含 prompt、description 和 uuids
+	voiceIdentifyData := make(map[string]types.SpeakerGroupInfo)
+	if len(response.Data.VoiceIdentify) > 0 {
+		// 将 map 格式的声纹组信息转换为配置格式
+		for groupName, groupInfo := range response.Data.VoiceIdentify {
+			groupData := types.SpeakerGroupInfo{
+				ID:          groupInfo.ID,
+				Name:        groupInfo.Name,
+				Prompt:      groupInfo.Prompt,
+				Description: groupInfo.Description,
+				Uuids:       groupInfo.Uuids,
+				TTSConfigID: groupInfo.TTSConfigID,
+				Voice:       groupInfo.Voice,
+			}
+			voiceIdentifyData[groupName] = groupData
+		}
+	}
+
 	// 构建配置结果
 	config := types.UConfig{
 		SystemPrompt: response.Data.Prompt, // 使用智能体的自定义提示
@@ -122,7 +150,8 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 			Provider: response.Data.Memory.Provider,
 			Config:   parseJsonData(response.Data.Memory.JsonData),
 		},
-		AgentId: response.Data.AgentId,
+		VoiceIdentify: voiceIdentifyData,
+		AgentId:       response.Data.AgentId,
 	}
 
 	log.Log().Infof("成功获取设备配置: deviceId: %s, config: %+v", deviceID, config)
@@ -146,6 +175,26 @@ func (c *ConfigManager) GetSystemConfig(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("获取系统配置失败: %w", err)
 	}
 
+	// 处理 voice_identify 配置，确保包含 threshold 字段
+	if voiceIdentifyData, exists := apiResponse.Data["voice_identify"]; exists {
+		if voiceIdentifyMap, ok := voiceIdentifyData.(map[string]interface{}); ok {
+			// 如果 voice_identify 配置存在但没有 threshold 字段，添加默认值
+			if _, hasThreshold := voiceIdentifyMap["threshold"]; !hasThreshold {
+				voiceIdentifyMap["threshold"] = 0.6
+				log.Log().Info("voice_identify 配置缺少 threshold 字段，已添加默认值 0.6")
+			} else {
+				// 验证阈值范围
+				if thresholdVal, ok := voiceIdentifyMap["threshold"].(float64); ok {
+					if thresholdVal < 0 || thresholdVal > 1 {
+						log.Log().Warnf("voice_identify.threshold 值 %.4f 超出有效范围 [0.0, 1.0]，使用默认值 0.6", thresholdVal)
+						voiceIdentifyMap["threshold"] = 0.6
+					}
+				}
+			}
+			// 更新配置数据
+			apiResponse.Data["voice_identify"] = voiceIdentifyMap
+		}
+	}
 	log.Debugf("从内控获取到系统配置: %+v", apiResponse.Data)
 
 	// 将API响应转换为配置JSON字符串

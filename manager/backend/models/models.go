@@ -73,16 +73,47 @@ type GlobalRole struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// 声纹组模型
+type SpeakerGroup struct {
+	ID          uint      `json:"id" gorm:"primarykey"`
+	UserID      uint      `json:"user_id" gorm:"not null;index;uniqueIndex:idx_speaker_groups_user_name,priority:1"`
+	AgentID     uint      `json:"agent_id" gorm:"not null;index"`
+	Name        string    `json:"name" gorm:"type:varchar(100);not null;uniqueIndex:idx_speaker_groups_user_name,priority:2"`
+	Prompt      string    `json:"prompt" gorm:"type:text"`
+	Description string    `json:"description" gorm:"type:text"`
+	TTSConfigID *string   `json:"tts_config_id" gorm:"type:varchar(100)"` // TTS配置ID
+	Voice       *string   `json:"voice" gorm:"type:varchar(200)"`         // 音色值
+	Status      string    `json:"status" gorm:"type:varchar(20);default:'active'"`
+	SampleCount int       `json:"sample_count" gorm:"default:0"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// 声纹样本模型
+type SpeakerSample struct {
+	ID             uint      `json:"id" gorm:"primarykey"`
+	SpeakerGroupID uint      `json:"speaker_group_id" gorm:"not null;index"`
+	UserID         uint      `json:"user_id" gorm:"not null;index"`
+	UUID           string    `json:"uuid" gorm:"type:varchar(36);not null;uniqueIndex"`
+	FilePath       string    `json:"file_path" gorm:"type:varchar(500);not null"`
+	FileName       string    `json:"file_name" gorm:"type:varchar(255)"`
+	FileSize       int64     `json:"file_size"`
+	Duration       float32   `json:"duration"`
+	Status         string    `json:"status" gorm:"type:varchar(20);default:'active'"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
 // ChatMessage 聊天消息模型
 type ChatMessage struct {
-	ID        uint      `json:"id" gorm:"primarykey"`
-	MessageID string    `json:"message_id" gorm:"type:varchar(64);uniqueIndex:idx_chat_messages_message_id;not null"`
+	ID        uint   `json:"id" gorm:"primarykey"`
+	MessageID string `json:"message_id" gorm:"type:varchar(64);uniqueIndex:idx_chat_messages_message_id;not null"`
 
 	// 关联信息（不使用外键）
-	DeviceID  string    `json:"device_id" gorm:"type:varchar(100);index:idx_device_id;not null"`
-	AgentID   string    `json:"agent_id" gorm:"type:varchar(64);index:idx_agent_id;not null"`
-	UserID    uint      `json:"user_id" gorm:"index:idx_user_id;not null"`
-	SessionID string    `json:"session_id" gorm:"type:varchar(64);index:idx_session_id"` // 仅作分组标记
+	DeviceID  string `json:"device_id" gorm:"type:varchar(100);index:idx_device_id;not null"`
+	AgentID   string `json:"agent_id" gorm:"type:varchar(64);index:idx_agent_id;not null"`
+	UserID    uint   `json:"user_id" gorm:"index:idx_user_id;not null"`
+	SessionID string `json:"session_id" gorm:"type:varchar(64);index:idx_session_id"` // 仅作分组标记
 
 	// 消息内容
 	Role    string `json:"role" gorm:"type:varchar(20);index;not null;comment:user|assistant|system|tool"`
