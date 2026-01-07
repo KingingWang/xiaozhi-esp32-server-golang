@@ -27,6 +27,7 @@ import (
 
 // Dialogue 表示对话历史
 type Dialogue struct {
+	mu       sync.RWMutex // 保护 Messages 的读写锁
 	Messages []*schema.Message
 }
 
@@ -146,10 +147,15 @@ func (c *ClientState) AddMessage(msg *schema.Message) {
 		log.Warnf("尝试添加 nil 消息到对话历史")
 		return
 	}
+	c.Dialogue.mu.Lock()
+	defer c.Dialogue.mu.Unlock()
 	c.Dialogue.Messages = append(c.Dialogue.Messages, msg)
 }
 
 func (c *ClientState) GetMessages(count int) []*schema.Message {
+	c.Dialogue.mu.RLock()
+	defer c.Dialogue.mu.RUnlock()
+
 	// 添加边界检查，防止数组越界
 	if len(c.Dialogue.Messages) == 0 {
 		return []*schema.Message{}
@@ -247,6 +253,8 @@ func AlignToolMessages(messages []*schema.Message) []*schema.Message {
 }
 
 func (c *ClientState) InitMessages(messages []*schema.Message) error {
+	c.Dialogue.mu.Lock()
+	defer c.Dialogue.mu.Unlock()
 	c.Dialogue.Messages = AlignToolMessages(messages)
 	return nil
 }

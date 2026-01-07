@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	MaxIdleDuration = 60 //60ms没有上下行数据 就断开
+	MaxIdleDuration = 300 //300s 没有上下行数据 就断开
 )
 
 // MqttUdpConn 实现 types.IConn 接口，适配 MQTT-UDP 连接

@@ -187,10 +187,13 @@ func (s *ChatSession) Start(pctx context.Context) error {
 		return err
 	}
 
-	err = s.initHistoryMessages()
-	if err != nil {
-		log.Errorf("初始化对话历史失败: %v", err)
-	}
+	// 异步加载历史消息，不阻塞会话启动
+	go func() {
+		err := s.initHistoryMessages()
+		if err != nil {
+			log.Errorf("初始化对话历史失败: %v", err)
+		}
+	}()
 
 	go s.CmdMessageLoop(s.ctx)   //处理信令消息
 	go s.AudioMessageLoop(s.ctx) //处理音频数据
@@ -209,6 +212,12 @@ func (s *ChatSession) initHistoryMessages() error {
 	// 根据配置选择数据源（无优先级关系，直接选择）
 	useRedis := s.shouldUseRedis()
 	useManager := s.shouldUseManager()
+
+	// 验证必要字段：DeviceID 不能为空
+	if s.clientState.DeviceID == "" {
+		log.Debugf("DeviceID 为空，跳过历史消息加载（可能在 hello 消息之前调用）")
+		return nil
+	}
 
 	// 根据配置选择数据源（无优先级关系，直接选择）
 	if useRedis {
@@ -271,6 +280,10 @@ func (s *ChatSession) loadFromManager() ([]*schema.Message, error) {
 		Enabled:   true,
 	}
 	client := history.NewHistoryClient(historyCfg)
+
+	if s.clientState.DeviceID == "" || s.clientState.AgentID == "" {
+		return []*schema.Message{}, nil
+	}
 
 	req := &history.GetMessagesRequest{
 		DeviceID:  s.clientState.DeviceID,

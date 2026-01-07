@@ -8,8 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-
-	"github.com/cenkalti/backoff/v4"
 )
 
 // Client 通用HTTP客户端
@@ -23,7 +21,7 @@ type Client struct {
 // NewClient 创建新的HTTP客户端
 func NewClient(cfg ClientConfig) *Client {
 	if cfg.MaxRetries <= 0 {
-		cfg.MaxRetries = 3 // 默认重试3次
+		cfg.MaxRetries = 1 // 默认重试3次
 	}
 
 	return &Client{
@@ -36,14 +34,9 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 }
 
-// DoRequest 执行HTTP请求（带重试机制）
+// DoRequest 执行HTTP请求
 func (c *Client) DoRequest(ctx context.Context, opts RequestOptions) error {
-	operation := func() error {
-		return c.doRequestOnce(ctx, opts)
-	}
-
-	backoffCfg := backoff.WithMaxRetries(backoff.NewExponentialBackOff(), uint64(c.maxRetries))
-	return backoff.Retry(operation, backoffCfg)
+	return c.doRequestOnce(ctx, opts)
 }
 
 // doRequestOnce 执行单次HTTP请求
@@ -185,11 +178,9 @@ func (c *Client) DoRequestRaw(ctx context.Context, opts RequestOptions) ([]byte,
 		return nil
 	}
 
-	backoffCfg := backoff.WithMaxRetries(backoff.NewExponentialBackOff(), uint64(c.maxRetries))
-	if err := backoff.Retry(operation, backoffCfg); err != nil {
+	if err := operation(); err != nil {
 		return nil, err
 	}
 
 	return responseBody, nil
 }
-

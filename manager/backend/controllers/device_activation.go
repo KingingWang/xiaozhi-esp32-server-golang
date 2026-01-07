@@ -50,9 +50,9 @@ func generateChallenge() string {
 // GET /api/public/device/check-activation?device_id=xxx&client_id=xxx
 func (dac *DeviceActivationController) CheckDeviceActivation(c *gin.Context) {
 	deviceId := c.Query("device_id")
-	clientId := c.Query("client_id")
+	//clientId := c.Query("client_id")
 
-	if deviceId == "" || clientId == "" {
+	if deviceId == "" /*|| clientId == ""*/ {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "device_id和client_id参数必填"})
 		return
 	}
@@ -86,9 +86,9 @@ func (dac *DeviceActivationController) CheckDeviceActivation(c *gin.Context) {
 // GET /api/public/device/activation-info?device_id=xxx&client_id=xxx
 func (dac *DeviceActivationController) GetActivationInfo(c *gin.Context) {
 	deviceId := c.Query("device_id")
-	clientId := c.Query("client_id")
+	//clientId := c.Query("client_id")
 
-	if deviceId == "" || clientId == "" {
+	if deviceId == "" /*|| clientId == ""*/ {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "device_id和client_id参数必填"})
 		return
 	}

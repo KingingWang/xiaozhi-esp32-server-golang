@@ -101,7 +101,8 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 			}
 		} else {
 			response.Prompt = agent.CustomPrompt
-			log.Printf("智能体 %d 存在，使用自定义提示词", device.AgentID)
+			// 将{{assistant_name}}替换为智能体昵称
+			response.Prompt = strings.ReplaceAll(response.Prompt, "{{assistant_name}}", agent.Name)
 		}
 	}
 
@@ -417,8 +418,8 @@ func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 	// 处理 voice_identify 配置（与控制台配置结构一致，包含 base_url、threshold 和 enabled）
 	// 优先使用环境变量 SPEAKER_SERVICE_URL，如果未定义则从数据库配置获取
 	baseURL := os.Getenv("SPEAKER_SERVICE_URL")
-	enabled := false // 默认启用
-	threshold := 0.6 // 默认阈值
+	enabled := true  // 默认启用
+	threshold := 0.4 // 默认阈值
 
 	// 从数据库配置获取 base_url、threshold 和 enabled 状态
 	if configs, exists := configsByType["voice_identify"]; exists && len(configs) > 0 {
@@ -459,13 +460,13 @@ func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 				}
 			}
 		}
-		// 如果获取到了 base_url，添加到响应中
-		if baseURL != "" {
-			response["voice_identify"] = gin.H{
-				"base_url":  baseURL,
-				"threshold": threshold,
-				"enable":    enabled,
-			}
+	}
+	// 如果获取到了 base_url，添加到响应中
+	if baseURL != "" {
+		response["voice_identify"] = gin.H{
+			"base_url":  baseURL,
+			"threshold": threshold,
+			"enable":    enabled,
 		}
 	}
 
