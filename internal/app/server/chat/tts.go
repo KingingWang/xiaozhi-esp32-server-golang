@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 	. "xiaozhi-esp32-server-golang/internal/data/client"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
@@ -32,6 +33,11 @@ type TTSManager struct {
 	// 聊天历史音频缓存：持续累积多段TTS音频（Opus帧数组）
 	audioHistoryBuffer [][]byte
 	audioMutex         sync.Mutex
+
+	// TTS暂停控制：0=播放，1=暂停
+	paused      int32
+	pausedMutex sync.Mutex
+	pausedCond  *sync.Cond
 }
 
 // NewTTSManager 只接受WithClientState
@@ -41,6 +47,7 @@ func NewTTSManager(clientState *ClientState, serverTransport *ServerTransport, o
 		serverTransport: serverTransport,
 		ttsQueue:        util.NewQueue[TTSQueueItem](10),
 	}
+	t.pausedCond = sync.NewCond(&t.pausedMutex)
 	for _, opt := range opts {
 		opt(t)
 	}
@@ -150,6 +157,9 @@ func getAlignedDuration(startTime time.Time, frameDuration time.Duration) time.D
 }
 
 func (t *TTSManager) SendTTSAudio(ctx context.Context, audioChan chan []byte, isStart bool) error {
+	// 每次任务开始时自动恢复播放状态
+	atomic.StoreInt32(&t.paused, 0)
+
 	totalFrames := 0 // 跟踪已发送的总帧数
 
 	isStatistic := true
@@ -169,6 +179,22 @@ func (t *TTSManager) SendTTSAudio(ctx context.Context, audioChan chan []byte, is
 
 	// 使用滑动窗口机制，确保对端始终缓存 cacheFrameCount 帧数据
 	for {
+		// 检查暂停状态（使用条件变量阻塞，而非轮询）
+		t.pausedMutex.Lock()
+		for atomic.LoadInt32(&t.paused) == 1 {
+			// 检查context是否已取消
+			select {
+			case <-ctx.Done():
+				t.pausedMutex.Unlock()
+				log.Debugf("SendTTSAudio context done during pause, exit")
+				return nil
+			default:
+			}
+			// 等待恢复信号（阻塞，不占用CPU）
+			t.pausedCond.Wait()
+		}
+		t.pausedMutex.Unlock()
+
 		// 计算下一帧应该发送的时间点
 		nextFrameTime := startTime.Add(time.Duration(totalFrames-cacheFrameCount) * frameDuration)
 		now := time.Now()
@@ -241,4 +267,36 @@ func (t *TTSManager) GetAndClearAudioHistory() [][]byte {
 	data := t.audioHistoryBuffer
 	t.audioHistoryBuffer = nil
 	return data
+}
+
+// PauseTTS 暂停TTS播放（可多次调用，幂等）
+func (t *TTSManager) PauseTTS() {
+	t.pausedMutex.Lock()
+	defer t.pausedMutex.Unlock()
+
+	if atomic.LoadInt32(&t.paused) == 1 {
+		return // 已经是暂停状态，无需操作
+	}
+
+	atomic.StoreInt32(&t.paused, 1)
+	log.Debugf("TTS已暂停")
+}
+
+// ResumeTTS 恢复TTS播放（可多次调用，幂等）
+func (t *TTSManager) ResumeTTS() {
+	t.pausedMutex.Lock()
+	defer t.pausedMutex.Unlock()
+
+	if atomic.LoadInt32(&t.paused) == 0 {
+		return // 已经是播放状态，无需操作
+	}
+
+	atomic.StoreInt32(&t.paused, 0)
+	t.pausedCond.Broadcast() // 唤醒所有等待的goroutine
+	log.Debugf("TTS已恢复")
+}
+
+// IsPaused 查询当前是否暂停
+func (t *TTSManager) IsPaused() bool {
+	return atomic.LoadInt32(&t.paused) == 1
 }
