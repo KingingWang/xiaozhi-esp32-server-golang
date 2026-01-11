@@ -150,6 +150,8 @@ func (w *WebSocketConn) SendCmd(msg []byte) error {
 		return errors.New("connection is closed")
 	}
 
+	log.Debugf("send cmd: %s", string(msg))
+
 	err := w.conn.WriteMessage(websocket.TextMessage, msg)
 	if err != nil {
 		log.Errorf("send cmd error: %v", err)

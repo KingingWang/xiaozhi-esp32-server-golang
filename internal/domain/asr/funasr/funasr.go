@@ -382,7 +382,7 @@ func (f *Funasr) forwardStreamAudio(ctx context.Context, cancelFunc context.Canc
 			// 转换PCM数据为字节
 			audioBytes := Float32SliceToBytes(pcmChunk)
 
-			log.Debugf("funasr forwardStreamAudio 发送音频数据, pcmChunk len: %v, audioBytes len: %v", len(pcmChunk), len(audioBytes))
+			//log.Debugf("funasr forwardStreamAudio 发送音频数据, pcmChunk len: %v, audioBytes len: %v", len(pcmChunk), len(audioBytes))
 
 			// 发送音频数据
 			err := f.writeMessage(conn, websocket.BinaryMessage, audioBytes)

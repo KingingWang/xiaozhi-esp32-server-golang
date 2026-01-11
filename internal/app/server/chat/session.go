@@ -870,6 +870,7 @@ func (s *ChatSession) OnListenStart() error {
 
 				//如果是realtime模式下，需要停止 当前的llm和tts
 				if s.clientState.IsRealTime() && viper.GetInt("chat.realtime_mode") == 2 {
+					log.Debugf("OnListenStart realtime模式下, 停止当前的llm和tts")
 					s.clientState.AfterAsrSessionCtx.Cancel()
 				}
 

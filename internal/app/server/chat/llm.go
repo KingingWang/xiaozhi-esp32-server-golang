@@ -175,7 +175,10 @@ func (l *LLMManager) HandleLLMResponseChannelAsync(ctx context.Context, userMess
 			l.serverTransport.SendTtsStart()
 		}
 		onEndFunc = func(err error, args ...any) {
-			l.serverTransport.SendTtsStop()
+			//非realtime模式下, 发送TTS停止命令
+			if !l.clientState.IsRealTime() {
+				l.serverTransport.SendTtsStop()
+			}
 
 			// 从 closure 中获取 fullText
 			audioData := l.ttsManager.GetAndClearAudioHistory()
@@ -266,7 +269,9 @@ func (l *LLMManager) HandleLLMResponseChannelSync(ctx context.Context, userMessa
 	ok, err := l.handleLLMResponse(ctx, userMessage, llmResponseChannel)
 
 	if needSendTtsCmd {
-		l.serverTransport.SendTtsStop()
+		if !l.clientState.IsRealTime() {
+			l.serverTransport.SendTtsStop()
+		}
 
 		// 收集TTS音频并发送聊天历史事件
 		// 注意：工具调用后的LLM响应（nest > 1）也会累积音频到缓存中，但不会清空

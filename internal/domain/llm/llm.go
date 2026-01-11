@@ -3,7 +3,6 @@ package llm
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"strings"
 	"time"
 	"unicode"
@@ -101,8 +100,8 @@ func HandleLLMWithContextAndTools(ctx context.Context, llmProvider LLMProvider, 
 				if message == nil {
 					break
 				}
-				byteMessage, _ := json.Marshal(message)
-				log.Infof("收到message: %s", string(byteMessage))
+				//byteMessage, _ := json.Marshal(message)
+				//log.Debugf("收到message: %s", string(byteMessage))
 				if message.Content != "" {
 					fullText += message.Content
 					buffer.WriteString(message.Content)
