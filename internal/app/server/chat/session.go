@@ -911,6 +911,14 @@ func (s *ChatSession) OnListenStart() error {
 					log.Debugf("获取声纹识别结果: %+v", speakerResult)
 				}
 
+				//如果是realtime模式 && 识别到声纹时，进行打断当前的llm和tts
+				if s.clientState.IsRealTime() && viper.GetInt("chat.realtime_mode") == 3 {
+					if speakerResult != nil && speakerResult.Identified {
+						log.Debugf("OnListenStart realtime模式 && 识别到声纹时, 打断当前的llm和tts")
+						s.clientState.AfterAsrSessionCtx.Cancel()
+					}
+				}
+
 				err = s.AddAsrResultToQueue(text, speakerResult)
 				if err != nil {
 					log.Errorf("开始对话失败: %v", err)
