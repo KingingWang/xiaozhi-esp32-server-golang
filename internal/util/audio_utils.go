@@ -221,11 +221,18 @@ func (d *AudioDecoder) RunWavDecoder(startTs int64, isRaw bool) error {
 		log.Debugf("将多声道音频转换为单声道输出")
 	}
 
+	// 确定输出采样率（如果指定了目标采样率，使用目标采样率；否则使用原始采样率）
+	outputSampleRate := sampleRate
+	if d.targetSampleRate > 0 {
+		outputSampleRate = d.targetSampleRate
+		log.Debugf("WAV解码器将进行重采样: %d Hz -> %d Hz", sampleRate, outputSampleRate)
+	}
+
 	// 根据目标格式决定是否创建Opus编码器
 	var enc *opus.Encoder
 	var err error
 	if d.TargetAudioFormat == "opus" {
-		enc, err = opus.NewEncoder(int(sampleRate), outputChannels, opus.AppAudio)
+		enc, err = opus.NewEncoder(outputSampleRate, outputChannels, opus.AppAudio)
 		if err != nil {
 			return fmt.Errorf("创建Opus编码器失败: %v", err)
 		}
@@ -233,13 +240,22 @@ func (d *AudioDecoder) RunWavDecoder(startTs int64, isRaw bool) error {
 	}
 
 	//opus相关配置及缓冲区
-	frameDurationMs := d.perFrameDurationMs              //每帧时长(ms)
-	frameSize := sampleRate * frameDurationMs / 1000     //每帧采样点数
-	pcmBuffer := make([]int16, frameSize*outputChannels) //PCM缓冲区
-	opusBuffer := make([]byte, 1000)                     //Opus输出缓冲区
+	frameDurationMs := d.perFrameDurationMs                //每帧时长(ms)
+	frameSize := outputSampleRate * frameDurationMs / 1000 //每帧采样点数（使用输出采样率）
+	opusBuffer := make([]byte, 1000)                       //Opus输出缓冲区
 
-	// 用于读取原始PCM数据的缓冲区
-	rawBuffer := make([]byte, frameSize*channels*2) // 16位采样=2字节
+	// 用于读取原始PCM数据的缓冲区（基于原始采样率计算）
+	rawFrameSize := sampleRate * frameDurationMs / 1000 //原始帧大小（基于原始采样率）
+	rawBuffer := make([]byte, rawFrameSize*channels*2)  // 16位采样=2字节
+
+	// PCM缓冲区：如果需要重采样，使用原始帧大小；否则使用输出帧大小
+	var pcmBufferSize int
+	if d.targetSampleRate > 0 && sampleRate != d.targetSampleRate {
+		pcmBufferSize = rawFrameSize * outputChannels // 使用原始帧大小，重采样后得到输出帧大小
+	} else {
+		pcmBufferSize = frameSize * outputChannels // 直接使用输出帧大小
+	}
+	pcmBuffer := make([]int16, pcmBufferSize) //PCM缓冲区
 	currentFramePos := 0
 	var firstFrame bool
 
@@ -254,20 +270,32 @@ func (d *AudioDecoder) RunWavDecoder(startTs int64, isRaw bool) error {
 			if err == io.EOF {
 				// 处理剩余不足一帧的数据
 				if currentFramePos > 0 {
-					paddedFrame := make([]int16, frameSize)
-					copy(paddedFrame, pcmBuffer[:currentFramePos])
+					var outputPcmBuffer []int16
+					// 如果需要重采样
+					if d.targetSampleRate > 0 && sampleRate != d.targetSampleRate {
+						// 重采样剩余数据
+						pcmBytes := Int16SliceToBytes(pcmBuffer[:currentFramePos])
+						pcmFloat32 := PCM16BytesToFloat32(pcmBytes)
+						pcmFloat32 = ResampleLinearFloat32(pcmFloat32, sampleRate, d.targetSampleRate)
+						outputPcmBuffer = Float32SliceToInt16Slice(pcmFloat32)
+					} else {
+						// 不需要重采样，直接使用，但需要补齐到输出帧大小
+						paddedFrame := make([]int16, frameSize)
+						copy(paddedFrame, pcmBuffer[:currentFramePos])
+						outputPcmBuffer = paddedFrame
+					}
 
 					// 根据目标格式输出数据
 					if d.TargetAudioFormat == "opus" {
 						// 编码最后一帧
-						if n, err := d.enc.Encode(paddedFrame, opusBuffer); err == nil {
+						if n, err := d.enc.Encode(outputPcmBuffer, opusBuffer); err == nil {
 							frameData := make([]byte, n)
 							copy(frameData, opusBuffer[:n])
 							d.outputOpusChan <- frameData
 						}
 					} else if d.TargetAudioFormat == "pcm" {
 						// 直接输出PCM数据
-						pcmData := Int16SliceToBytes(paddedFrame)
+						pcmData := Int16SliceToBytes(outputPcmBuffer)
 						d.outputOpusChan <- pcmData
 					}
 				}
@@ -294,22 +322,37 @@ func (d *AudioDecoder) RunWavDecoder(startTs int64, isRaw bool) error {
 				currentFramePos++
 
 				// 如果缓冲区已满,进行编码或输出
-				if currentFramePos == frameSize {
+				// 判断条件：如果需要重采样，使用原始帧大小；否则使用输出帧大小
+				bufferFullSize := pcmBufferSize
+				if currentFramePos == bufferFullSize {
 					if !firstFrame {
 						firstFrame = true
 						log.Infof("tts云端->首帧解码完成耗时: %d ms", time.Now().UnixMilli()-startTs)
 					}
 
+					var outputPcmBuffer []int16
+					// 如果需要重采样
+					if d.targetSampleRate > 0 && sampleRate != d.targetSampleRate {
+						// 重采样：从原始采样率转换到目标采样率
+						pcmBytes := Int16SliceToBytes(pcmBuffer)
+						pcmFloat32 := PCM16BytesToFloat32(pcmBytes)
+						pcmFloat32 = ResampleLinearFloat32(pcmFloat32, sampleRate, d.targetSampleRate)
+						outputPcmBuffer = Float32SliceToInt16Slice(pcmFloat32)
+					} else {
+						// 不需要重采样，直接使用
+						outputPcmBuffer = pcmBuffer
+					}
+
 					if d.TargetAudioFormat == "opus" {
 						// Opus编码输出
-						if n, err := d.enc.Encode(pcmBuffer, opusBuffer); err == nil {
+						if n, err := d.enc.Encode(outputPcmBuffer, opusBuffer); err == nil {
 							frameData := make([]byte, n)
 							copy(frameData, opusBuffer[:n])
 							d.outputOpusChan <- frameData
 						}
 					} else if d.TargetAudioFormat == "pcm" {
 						// 直接输出PCM数据
-						pcmData := Int16SliceToBytes(pcmBuffer)
+						pcmData := Int16SliceToBytes(outputPcmBuffer)
 						d.outputOpusChan <- pcmData
 					}
 					currentFramePos = 0
@@ -564,7 +607,7 @@ func (w *writeSeekerBuffer) Write(p []byte) (n int, err error) {
 	// 获取当前缓冲区数据的副本（避免直接修改底层缓冲区）
 	data := make([]byte, w.Buffer.Len())
 	copy(data, w.Buffer.Bytes())
-	
+
 	// 如果写入会超出当前缓冲区，需要扩展
 	endPos := w.pos + int64(len(p))
 	if endPos > int64(len(data)) {
@@ -572,14 +615,14 @@ func (w *writeSeekerBuffer) Write(p []byte) (n int, err error) {
 		extra := int(endPos - int64(len(data)))
 		data = append(data, make([]byte, extra)...)
 	}
-	
+
 	// 在指定位置写入数据
 	copy(data[w.pos:], p)
-	
+
 	// 更新缓冲区
 	w.Buffer.Reset()
 	w.Buffer.Write(data)
-	
+
 	n = len(p)
 	w.pos += int64(n)
 	return n, nil

@@ -145,7 +145,7 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 					state.Vad.AddVoiceDuration(int64(audioFormat.FrameDuration))
 
 					voiceDuration := state.Vad.GetVoiceDuration()
-					if state.IsRealTime() && viper.GetInt("chat.realtime_mode") == 1 && voiceDuration > 360 {
+					if state.IsRealTime() && viper.GetInt("chat.realtime_mode") == RealTimeModeVadInterrupt && voiceDuration > 360 {
 						// 只有在未触发过的情况下才执行，确保只执行一次
 						if !hasTriggeredCancel {
 							//realtime模式下, 如果此时有正在进行的llm和tts则取消掉

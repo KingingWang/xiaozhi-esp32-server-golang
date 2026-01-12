@@ -39,6 +39,12 @@ const (
 	ClientStatusTTSStart   = "ttsStart"
 )
 
+const (
+	RealTimeModeVadInterrupt                = 1 //realtime模式下，使用vad打断
+	RealTimeModeAsrInterrupt                = 2 //realtime模式下，使用asr打断
+	RealTimeModeAsrSpeakerIdentifyInterrupt = 3 //realtime模式下，asr识别到声纹时进行打断
+)
+
 type SendAudioData func(audioData []byte) error
 
 // ClientState 表示客户端状态

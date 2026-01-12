@@ -869,7 +869,7 @@ func (s *ChatSession) OnListenStart() error {
 				})
 
 				//如果是realtime模式下，需要停止 当前的llm和tts
-				if s.clientState.IsRealTime() && viper.GetInt("chat.realtime_mode") == 2 {
+				if s.clientState.IsRealTime() && viper.GetInt("chat.realtime_mode") == RealTimeModeAsrInterrupt {
 					log.Debugf("OnListenStart realtime模式下, 停止当前的llm和tts")
 					s.clientState.AfterAsrSessionCtx.Cancel()
 				}
@@ -879,14 +879,6 @@ func (s *ChatSession) OnListenStart() error {
 
 				//当获取到asr结果时, 结束语音输入（OnVoiceSilence 中会异步获取声纹结果）
 				s.clientState.OnVoiceSilence()
-
-				//发送asr消息
-				err = s.serverTransport.SendAsrResult(text)
-				if err != nil {
-					log.Errorf("发送asr消息失败: %v", err)
-					s.Close()
-					return
-				}
 
 				// 获取暂存的声纹结果（带超时）
 				var speakerResult *speaker.IdentifyResult
@@ -911,19 +903,26 @@ func (s *ChatSession) OnListenStart() error {
 					log.Debugf("获取声纹识别结果: %+v", speakerResult)
 				}
 
+				isNeedSendAsrText := true
+
 				//如果是realtime模式 && 识别到声纹时，进行打断当前的llm和tts
-				if s.clientState.IsRealTime() && viper.GetInt("chat.realtime_mode") == 3 {
+				if s.clientState.IsRealTime() && viper.GetInt("chat.realtime_mode") == RealTimeModeAsrSpeakerIdentifyInterrupt {
 					if speakerResult != nil && speakerResult.Identified {
 						log.Debugf("OnListenStart realtime模式 && 识别到声纹时, 打断当前的llm和tts")
 						s.clientState.AfterAsrSessionCtx.Cancel()
+						isNeedSendAsrText = true
+					} else {
+						isNeedSendAsrText = false
 					}
 				}
 
-				err = s.AddAsrResultToQueue(text, speakerResult)
-				if err != nil {
-					log.Errorf("开始对话失败: %v", err)
-					s.Close()
-					return
+				if isNeedSendAsrText {
+					err = s.AddAsrResultToQueue(text, speakerResult)
+					if err != nil {
+						log.Errorf("开始对话失败: %v", err)
+						s.Close()
+						return
+					}
 				}
 
 				if s.clientState.IsRealTime() {

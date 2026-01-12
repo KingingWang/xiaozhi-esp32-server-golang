@@ -234,8 +234,9 @@ func (p *EdgeOfflineTTSProvider) TextToSpeech(ctx context.Context, text string, 
 	outputChan := make(chan []byte, 1000)
 	startTs := time.Now().UnixMilli()
 
-	// 创建音频解码器
-	audioDecoder, err := util.CreateAudioDecoder(ctx, pipeReader, outputChan, frameDuration, "mp3")
+	// 创建音频解码器，总是使用带重采样的解码器（从24kHz转换到目标采样率）
+	// 假设BinaryMessage是24kHz的MP3，重采样到目标采样率
+	audioDecoder, err := util.CreateAudioDecoderWithSampleRate(ctx, pipeReader, outputChan, frameDuration, "mp3", sampleRate)
 	if err != nil {
 		pipeReader.Close()
 		return nil, fmt.Errorf("创建音频解码器失败: %v", err)
@@ -324,17 +325,19 @@ func (p *EdgeOfflineTTSProvider) TextToSpeechStream(ctx context.Context, text st
 
 		// 启动解码器
 		go func() {
+			log.Debugf("edge_offline TextToSpeechStream 创建音频解码器, sampleRate: %d, frameDuration: %d", sampleRate, frameDuration)
 			startTs := time.Now().UnixMilli()
-			// 创建音频解码器
-			audioDecoder, err := util.CreateAudioDecoder(ctx, pipeReader, outputChan, frameDuration, "pcm")
+			// 创建音频解码器，总是使用带重采样的解码器（从24kHz转换到目标采样率）
+			// 假设BinaryMessage是24kHz的PCM，重采样到目标采样率
+			audioDecoder, err := util.CreateAudioDecoderWithSampleRate(ctx, pipeReader, outputChan, frameDuration, "pcm", sampleRate)
 			if err != nil {
 				pipeReader.Close()
 				log.Errorf("创建音频解码器失败: %v", err)
 				return
 			}
-
+			// 设置原始PCM格式为24kHz
 			audioDecoder.WithFormat(beep.Format{
-				SampleRate:  beep.SampleRate(sampleRate),
+				SampleRate:  beep.SampleRate(24000), // 原始采样率
 				NumChannels: channels,
 				Precision:   2,
 			})
