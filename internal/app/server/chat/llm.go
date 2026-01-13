@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/base64"
@@ -19,6 +20,7 @@ import (
 	"xiaozhi-esp32-server-golang/internal/domain/mcp"
 	"xiaozhi-esp32-server-golang/internal/domain/play_music"
 	"xiaozhi-esp32-server-golang/internal/domain/speaker"
+	"xiaozhi-esp32-server-golang/internal/pool"
 	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
 
@@ -224,6 +226,7 @@ func (l *LLMManager) HandleLLMResponseChannelAsync(ctx context.Context, userMess
 		onStartFunc:  onStartFunc,
 		onEndFunc:    onEndFunc,
 	}
+
 	err := l.llmResponseQueue.Push(item)
 	if err != nil {
 		log.Warnf("llmResponseQueue 已满或已关闭, 丢弃消息")
@@ -756,6 +759,141 @@ func (l *LLMManager) handleToolResult(toolResultStr string) (mcp_go.CallToolResu
 	return toolResult, true
 }
 
+// handleLLMWithContextAndTools 使用上下文控制来处理LLM响应（兼容带工具和不带工具）
+// 内部自动管理 LLM 资源的获取和释放
+func (l *LLMManager) handleLLMWithContextAndTools(
+	ctx context.Context,
+	dialogue []*schema.Message,
+	tools []*schema.ToolInfo,
+) (chan llm_common.LLMResponseStruct, error) {
+	// 获取 LLM 资源
+	llmWrapper, err := pool.Acquire[llm.LLMProvider](
+		"llm",
+		l.clientState.DeviceConfig.Llm.Provider,
+		l.clientState.DeviceConfig.Llm.Config,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("获取LLM资源失败: %w", err)
+	}
+
+	// 获取 provider
+	llmProvider := llmWrapper.GetProvider()
+
+	// 调用 LLM provider
+	msgChan := llmProvider.ResponseWithContext(ctx, l.clientState.SessionID, dialogue, tools)
+
+	// 创建响应 channel
+	sentenceChannel := make(chan llm_common.LLMResponseStruct, 2)
+	startTs := time.Now().UnixMilli()
+	var firstFrame bool
+	fullText := ""
+	var buffer bytes.Buffer // 用于累积接收到的内容
+	isFirst := true
+
+	// 启动 goroutine 处理响应
+	go func() {
+		defer func() {
+			log.Debugf("full Response with %d tools, fullText: %s", len(tools), fullText)
+			close(sentenceChannel)
+			// 释放资源
+			pool.Release(llmWrapper)
+			log.Debugf("LLM资源已释放")
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				log.Infof("上下文已取消，停止LLM响应处理: %v, context done, exit", ctx.Err())
+				return
+			case message, ok := <-msgChan:
+				if !ok {
+					remaining := buffer.String()
+					if remaining != "" {
+						log.Infof("处理剩余内容: %s", remaining)
+						fullText += remaining
+						select {
+						case <-ctx.Done():
+							log.Infof("上下文已取消，停止LLM响应处理: %v, context done, exit", ctx.Err())
+							return
+						case sentenceChannel <- llm_common.LLMResponseStruct{
+							Text:  remaining,
+							IsEnd: true,
+						}:
+						}
+					} else {
+						select {
+						case <-ctx.Done():
+							log.Infof("上下文已取消，停止LLM响应处理: %v, context done, exit", ctx.Err())
+							return
+						case sentenceChannel <- llm_common.LLMResponseStruct{
+							Text:  "",
+							IsEnd: true,
+						}:
+						}
+					}
+					return
+				}
+				if message == nil {
+					break
+				}
+				if message.Content != "" {
+					fullText += message.Content
+					buffer.WriteString(message.Content)
+					if util.ContainsSentenceSeparator(message.Content, isFirst) {
+						sentences, remaining := util.ExtractSmartSentences(buffer.String(), 2, 100, isFirst)
+						if len(sentences) > 0 {
+							for _, sentence := range sentences {
+								if sentence != "" {
+									if !firstFrame {
+										firstFrame = true
+										log.Infof("耗时统计: llm工具首句: %d ms", time.Now().UnixMilli()-startTs)
+									}
+									log.Infof("处理完整句子: %s", sentence)
+									select {
+									case <-ctx.Done():
+										log.Infof("上下文已取消，停止LLM响应处理: %v, context done, exit", ctx.Err())
+										return
+									case sentenceChannel <- llm_common.LLMResponseStruct{
+										Text:    sentence,
+										IsStart: isFirst,
+										IsEnd:   false,
+									}:
+									}
+
+									if isFirst {
+										isFirst = false
+									}
+								}
+							}
+						}
+						buffer.Reset()
+						buffer.WriteString(remaining)
+						if isFirst {
+							isFirst = false
+						}
+					}
+				}
+				// 工具调用响应（假设 ToolCalls 字段）
+				if len(message.ToolCalls) > 0 {
+					log.Infof("处理工具调用: %+v", message.ToolCalls)
+					select {
+					case <-ctx.Done():
+						log.Infof("上下文已取消，停止LLM响应处理: %v, context done, exit", ctx.Err())
+						return
+					case sentenceChannel <- llm_common.LLMResponseStruct{
+						ToolCalls: message.ToolCalls,
+						IsStart:   isFirst,
+						IsEnd:     false,
+					}:
+					}
+				}
+			}
+		}
+	}()
+
+	return sentenceChannel, nil
+}
+
 func (l *LLMManager) DoLLmRequest(ctx context.Context, userMessage *schema.Message, einoTools []*schema.ToolInfo, isSync bool, speakerResult *speaker.IdentifyResult) error {
 	log.Debugf("发送带工具的 LLM 请求, seesionID: %s, requestEinoMessages: %+v", l.clientState.SessionID, userMessage)
 	clientState := l.clientState
@@ -765,12 +903,12 @@ func (l *LLMManager) DoLLmRequest(ctx context.Context, userMessage *schema.Messa
 	//组装历史消息和当前用户的消息
 	requestMessages := l.GetMessages(ctx, userMessage, MaxMessageCount, speakerResult)
 	clientState.SetStatus(ClientStatusLLMStart)
-	responseSentences, err := llm.HandleLLMWithContextAndTools(
+
+	// 调用内部方法处理 LLM 响应，资源在方法内部管理
+	responseSentences, err := l.handleLLMWithContextAndTools(
 		ctx,
-		clientState.LLMProvider,
 		requestMessages,
 		einoTools,
-		l.clientState.SessionID,
 	)
 	if err != nil {
 		log.Errorf("发送带工具的 LLM 请求失败, seesionID: %s, error: %v", l.clientState.SessionID, err)
@@ -780,12 +918,14 @@ func (l *LLMManager) DoLLmRequest(ctx context.Context, userMessage *schema.Messa
 	log.Debugf("DoLLmRequest goroutine开始 - SessionID: %s, context状态: %v", l.clientState.SessionID, ctx.Err())
 
 	if isSync {
+		// 同步处理：资源会在 handleLLMWithContextAndTools 的 defer 中自动释放
 		_, err := l.HandleLLMResponseChannelSync(ctx, userMessage, responseSentences, einoTools)
 		if err != nil {
 			log.Errorf("处理 LLM 响应失败, seesionID: %s, error: %v", l.clientState.SessionID, err)
 			return err
 		}
 	} else {
+		// 异步处理：资源会在 handleLLMWithContextAndTools 的 defer 中自动释放
 		err = l.HandleLLMResponseChannelAsync(ctx, userMessage, responseSentences)
 		if err != nil {
 			log.Errorf("处理 LLM 响应失败, seesionID: %s, error: %v", l.clientState.SessionID, err)

@@ -7,6 +7,8 @@ import (
 	"time"
 	. "xiaozhi-esp32-server-golang/internal/data/client"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
+	"xiaozhi-esp32-server-golang/internal/domain/tts"
+	"xiaozhi-esp32-server-golang/internal/pool"
 	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
 )
@@ -108,6 +110,75 @@ func (t *TTSManager) handleTextResponse(ctx context.Context, llmResponse llm_com
 	return nil
 }
 
+// getTTSProviderInstance 获取TTS Provider实例（从资源池获取并动态设置音色）
+func (t *TTSManager) getTTSProviderInstance() (*pool.ResourceWrapper[tts.TTSProvider], error) {
+	// 优先使用声纹TTS配置
+	var ttsConfig map[string]interface{}
+	var ttsProvider string
+
+	if t.clientState.SpeakerTTSConfig != nil && len(t.clientState.SpeakerTTSConfig) > 0 {
+		// 使用声纹TTS配置
+		if provider, ok := t.clientState.SpeakerTTSConfig["provider"].(string); ok {
+			ttsProvider = provider
+		} else {
+			log.Warnf("声纹TTS配置中缺少 provider，使用默认配置")
+			ttsProvider = t.clientState.DeviceConfig.Tts.Provider
+			ttsConfig = t.clientState.DeviceConfig.Tts.Config
+		}
+		// 深拷贝配置
+		ttsConfig = make(map[string]interface{})
+		for k, v := range t.clientState.SpeakerTTSConfig {
+			ttsConfig[k] = v
+		}
+	} else {
+		// 使用默认TTS配置
+		ttsProvider = t.clientState.DeviceConfig.Tts.Provider
+		ttsConfig = t.clientState.DeviceConfig.Tts.Config
+	}
+
+	// 从资源池获取 TTS 资源（key 只包含 provider）
+	ttsWrapper, err := pool.Acquire[tts.TTSProvider](
+		"tts",
+		ttsProvider,
+		ttsConfig, // 传入完整配置用于创建实例（首次创建时使用）
+	)
+	if err != nil {
+		log.Errorf("获取TTS资源失败: %v", err)
+		return nil, fmt.Errorf("获取TTS资源失败: %v", err)
+	}
+
+	ttsProviderInstance := ttsWrapper.GetProvider()
+
+	// 动态修改音色（如果使用声纹TTS配置）
+	if t.clientState.SpeakerTTSConfig != nil && len(t.clientState.SpeakerTTSConfig) > 0 {
+		// 提取音色相关配置
+		voiceConfig := make(map[string]interface{})
+		// 根据 provider 类型提取对应的音色字段
+		if ttsProvider == "cosyvoice" {
+			if spkID, ok := ttsConfig["spk_id"].(string); ok && spkID != "" {
+				voiceConfig["spk_id"] = spkID
+			}
+		} else {
+			// 其他 provider 使用 voice 字段
+			if voice, ok := ttsConfig["voice"].(string); ok && voice != "" {
+				voiceConfig["voice"] = voice
+			}
+		}
+
+		// 调用 SetVoice 方法动态设置音色
+		if len(voiceConfig) > 0 {
+			if err := ttsProviderInstance.SetVoice(voiceConfig); err != nil {
+				log.Warnf("动态设置TTS音色失败: %v", err)
+				// 继续使用，不返回错误
+			} else {
+				log.Debugf("动态设置TTS音色成功: %+v", voiceConfig)
+			}
+		}
+	}
+
+	return ttsWrapper, nil
+}
+
 // 同步 TTS 处理
 func (t *TTSManager) handleTts(ctx context.Context, llmResponse llm_common.LLMResponseStruct) error {
 	log.Debugf("handleTts start, text: %s", llmResponse.Text)
@@ -115,8 +186,17 @@ func (t *TTSManager) handleTts(ctx context.Context, llmResponse llm_common.LLMRe
 		return nil
 	}
 
+	// 获取TTS Provider实例
+	ttsWrapper, err := t.getTTSProviderInstance()
+	if err != nil {
+		return err
+	}
+	defer pool.Release(ttsWrapper)
+
+	ttsProviderInstance := ttsWrapper.GetProvider()
+
 	// 使用带上下文的TTS处理
-	outputChan, err := t.clientState.GetTtsProvider().TextToSpeechStream(ctx, llmResponse.Text, t.clientState.OutputAudioFormat.SampleRate, t.clientState.OutputAudioFormat.Channels, t.clientState.OutputAudioFormat.FrameDuration)
+	outputChan, err := ttsProviderInstance.TextToSpeechStream(ctx, llmResponse.Text, t.clientState.OutputAudioFormat.SampleRate, t.clientState.OutputAudioFormat.Channels, t.clientState.OutputAudioFormat.FrameDuration)
 	if err != nil {
 		log.Errorf("生成 TTS 音频失败: %v", err)
 		return fmt.Errorf("生成 TTS 音频失败: %v", err)

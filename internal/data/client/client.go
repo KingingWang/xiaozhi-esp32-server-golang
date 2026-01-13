@@ -9,7 +9,6 @@ import (
 
 	"sync"
 
-	"xiaozhi-esp32-server-golang/internal/domain/asr"
 	utypes "xiaozhi-esp32-server-golang/internal/domain/config/types"
 	"xiaozhi-esp32-server-golang/internal/domain/llm"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
@@ -64,8 +63,8 @@ type ClientState struct {
 	Llm
 
 	// TTS 提供者
-	TTSProvider        tts.TTSProvider // 默认TTS提供者
-	SpeakerTTSProvider tts.TTSProvider // 声纹识别的TTS提供者（优先使用）
+	TTSProvider      tts.TTSProvider        // 默认TTS提供者
+	SpeakerTTSConfig map[string]interface{} // 声纹识别的TTS配置（完整config，优先使用）
 	// memory提供者
 	MemoryProvider memory.MemoryProvider
 	MemoryContext  string //memory context
@@ -106,15 +105,6 @@ type ClientState struct {
 
 	// 异步获取声纹结果的回调函数（在 session 中设置）
 	OnVoiceSilenceSpeakerCallback func(ctx context.Context)
-}
-
-// GetTtsProvider 获取当前应该使用的TTS Provider
-// 优先使用声纹识别的TTS Provider，如果没有则使用TTSProvider（默认）
-func (c *ClientState) GetTtsProvider() tts.TTSProvider {
-	if c.SpeakerTTSProvider != nil {
-		return c.SpeakerTTSProvider
-	}
-	return c.TTSProvider
 }
 
 // IsSpeakerEnabled 检查是否启用声纹识别（从全局配置中读取）
@@ -363,17 +353,11 @@ func (s *ClientState) InitAsr() error {
 
 	log.Infof("初始化asr, asrConfig: %+v", asrConfig)
 
-	//初始化asr
-	asrProvider, err := asr.NewAsrProvider(asrConfig.Provider, asrConfig.Config)
-	if err != nil {
-		log.Errorf("创建asr提供者失败: %v", err)
-		return fmt.Errorf("创建asr提供者失败: %v", err)
-	}
+	//初始化asr（不再直接创建 AsrProvider，改为使用资源池）
 	ctx, cancel := context.WithCancel(s.Ctx)
 	s.Asr = Asr{
 		Ctx:             ctx,
 		Cancel:          cancel,
-		AsrProvider:     asrProvider,
 		AsrAudioChannel: make(chan []float32, 100),
 		AsrEnd:          make(chan bool, 1),
 		AsrResult:       bytes.Buffer{},
@@ -390,6 +374,11 @@ func (s *ClientState) InitAsr() error {
 func (c *ClientState) Destroy() {
 	c.Asr.Stop()
 	c.Vad.Reset()
+
+	// 归还ASR资源（如果存在）
+	// 注意：这里需要导入 pool 包，但为了避免循环依赖，在调用处处理
+	// 或者在这里使用类型断言，但需要导入 pool 包
+	// 暂时在调用处（ChatSession.Close）处理资源归还
 
 	c.VoiceStatus.Reset()
 	c.AsrAudioBuffer.ClearAsrAudioData()

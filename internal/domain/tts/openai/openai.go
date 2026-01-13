@@ -290,3 +290,12 @@ func (p *OpenAITTSProvider) TextToSpeechStream(ctx context.Context, text string,
 
 	return outputChan, nil
 }
+
+// SetVoice 设置音色参数
+func (p *OpenAITTSProvider) SetVoice(voiceConfig map[string]interface{}) error {
+	if voice, ok := voiceConfig["voice"].(string); ok && voice != "" {
+		p.Voice = voice
+		return nil
+	}
+	return fmt.Errorf("无效的音色配置: 缺少 voice")
+}

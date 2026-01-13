@@ -195,12 +195,12 @@ const form = reactive({
   }
 })
 
-// 根据provider生成配置JSON
+// 根据provider生成配置JSON（不带key，与ASR/LLM/TTS保持一致）
 const generateConfig = () => {
   if (form.provider === 'webrtc_vad') {
-    return JSON.stringify({ webrtc_vad: form.webrtc_vad })
+    return JSON.stringify(form.webrtc_vad)
   } else if (form.provider === 'silero_vad') {
-    return JSON.stringify({ silero_vad: form.silero_vad })
+    return JSON.stringify(form.silero_vad)
   }
   return '{}'
 }
@@ -244,13 +244,22 @@ const editConfig = (config) => {
   form.enabled = config.enabled
   
   // 解析配置JSON并填充到对应字段
+  // 兼容新旧格式：带key的格式（{"webrtc_vad": {...}}）和不带key的格式（{...}）
   try {
     const configObj = JSON.parse(config.json_data || '{}')
+    
+    // 兼容旧格式：带key的格式（{"webrtc_vad": {...}} 或 {"silero_vad": {...}}）
     if (configObj.webrtc_vad) {
       form.webrtc_vad = { ...form.webrtc_vad, ...configObj.webrtc_vad }
-    }
-    if (configObj.silero_vad) {
+    } else if (configObj.silero_vad) {
       form.silero_vad = { ...form.silero_vad, ...configObj.silero_vad }
+    } else {
+      // 新格式：不带key，直接是配置对象
+      if (config.provider === 'webrtc_vad') {
+        form.webrtc_vad = { ...form.webrtc_vad, ...configObj }
+      } else if (config.provider === 'silero_vad') {
+        form.silero_vad = { ...form.silero_vad, ...configObj }
+      }
     }
   } catch (error) {
     console.error('解析配置JSON失败:', error)

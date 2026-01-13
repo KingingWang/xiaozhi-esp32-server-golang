@@ -26,6 +26,10 @@ type AsrProvider interface {
 // asrType: ASR引擎类型，目前支持 "funasr"
 // config: ASR引擎配置，为 map[string]interface{} 类型
 func NewAsrProvider(asrType string, config map[string]interface{}) (AsrProvider, error) {
+	// 优先使用 config 中的 provider，否则使用参数中的 provider
+	if configProvider, ok := config["provider"].(string); ok && configProvider != "" {
+		asrType = configProvider
+	}
 	switch asrType {
 	case constants.AsrTypeFunAsr:
 		return NewFunasrAdapter(config)

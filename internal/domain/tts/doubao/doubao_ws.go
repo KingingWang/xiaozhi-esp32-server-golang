@@ -658,3 +658,12 @@ func saveAudioToTmp(audioData []byte, format string) error {
 	log.Debugf("音频文件已保存: %s", filename)
 	return nil
 }
+
+// SetVoice 设置音色参数
+func (p *DoubaoWSProvider) SetVoice(voiceConfig map[string]interface{}) error {
+	if voice, ok := voiceConfig["voice"].(string); ok && voice != "" {
+		p.Voice = voice
+		return nil
+	}
+	return fmt.Errorf("无效的音色配置: 缺少 voice")
+}

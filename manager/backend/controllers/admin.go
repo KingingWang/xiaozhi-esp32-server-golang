@@ -123,6 +123,33 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get default VAD config"})
 		return
 	}
+	// 兼容旧格式：如果JsonData只有一个key元素，说明是旧格式（带key），提取出内部配置并更新JsonData
+	if response.VAD.JsonData != "" {
+		var configData map[string]interface{}
+		if err := json.Unmarshal([]byte(response.VAD.JsonData), &configData); err == nil {
+			// 兼容旧格式：如果只有一个key，说明是旧格式（带key），提取出内部配置
+			var actualConfigData map[string]interface{}
+			if len(configData) == 1 {
+				// 旧格式：只有一个key，提取其值
+				for _, value := range configData {
+					if innerConfig, ok := value.(map[string]interface{}); ok {
+						actualConfigData = innerConfig
+					} else {
+						// 如果不是map类型，直接使用原数据
+						actualConfigData = configData
+					}
+					break
+				}
+			} else {
+				// 新格式：不带key，直接使用configData
+				actualConfigData = configData
+			}
+			// 重新序列化为不带key的格式
+			if updatedJsonData, err := json.Marshal(actualConfigData); err == nil {
+				response.VAD.JsonData = string(updatedJsonData)
+			}
+		}
+	}
 
 	// 获取ASR默认配置
 	if err := ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "asr", true, true).First(&response.ASR).Error; err != nil {
@@ -227,11 +254,11 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": response})
 }
 
-// GetSystemConfigs 获取系统配置信息，包括mqtt, mqtt_server, udp, ota, mcp, local_mcp, voice_identify, tts
+// GetSystemConfigs 获取系统配置信息，包括mqtt, mqtt_server, udp, ota, mcp, local_mcp, voice_identify, tts, vad, asr, llm
 func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 	// 一次性获取所有相关配置（包括启用和未启用的）
 	var allConfigs []models.Config
-	if err := ac.DB.Where("type IN (?)", []string{"mqtt", "mqtt_server", "udp", "ota", "mcp", "local_mcp", "voice_identify", "tts"}).Find(&allConfigs).Error; err != nil {
+	if err := ac.DB.Where("type IN (?)", []string{"mqtt", "mqtt_server", "udp", "ota", "mcp", "local_mcp", "voice_identify", "tts", "vad", "asr", "llm"}).Find(&allConfigs).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get system configs"})
 		return
 	}
@@ -470,26 +497,161 @@ func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 		}
 	}
 
-	// 处理 TTS 配置，返回所有启用的 TTS 配置列表
+	// 处理 TTS 配置，返回格式与 config.yaml 一致，使用 config_id 作为 key
 	if ttsConfigs, exists := configsByType["tts"]; exists && len(ttsConfigs) > 0 {
-		var allTTSConfigs []gin.H
+		ttsConfigMap := make(gin.H)
 		for _, config := range ttsConfigs {
 			if config.Enabled { // 只返回启用的配置
-				var configData map[string]interface{}
+				configData := make(map[string]interface{})
 				if config.JsonData != "" {
 					json.Unmarshal([]byte(config.JsonData), &configData)
 				}
 
-				allTTSConfigs = append(allTTSConfigs, gin.H{
-					"config_id":  config.ConfigID,
-					"name":       config.Name,
+				// 组装成与 config.yaml 相同的格式
+				configItem := gin.H{
 					"provider":   config.Provider,
-					"config":     configData,
+					"name":       config.Name,
 					"is_default": config.IsDefault,
-				})
+				}
+				// 将 configData 中的字段展开到 configItem 中
+				for k, v := range configData {
+					configItem[k] = v
+				}
+				// 使用 config_id 作为 key
+				ttsConfigMap[config.ConfigID] = configItem
+
+				// 如果当前配置是默认配置，将 config_id 赋值给顶层的 provider 字段
+				if config.IsDefault {
+					ttsConfigMap["provider"] = config.ConfigID
+				}
 			}
 		}
-		response["all_tts_configs"] = allTTSConfigs
+		if len(ttsConfigMap) > 0 {
+			response["tts"] = ttsConfigMap
+		}
+	}
+
+	// 处理 VAD 配置，返回格式与 config.yaml 一致，使用 config_id 作为 key
+	// 兼容新旧格式：带key的格式（{"webrtc_vad": {...}}）和不带key的格式（{...}）
+	if vadConfigs, exists := configsByType["vad"]; exists && len(vadConfigs) > 0 {
+		vadConfigMap := make(gin.H)
+		for _, config := range vadConfigs {
+			if config.Enabled { // 只返回启用的配置
+				configData := make(map[string]interface{})
+				if config.JsonData != "" {
+					if err := json.Unmarshal([]byte(config.JsonData), &configData); err != nil {
+						// JSON解析失败，跳过此配置
+						continue
+					}
+				}
+
+				// 兼容旧格式：如果只有一个key，说明是旧格式（带key），提取出内部配置
+				var actualConfigData map[string]interface{}
+				if len(configData) == 1 {
+					// 旧格式：只有一个key，提取其值
+					for _, value := range configData {
+						if innerConfig, ok := value.(map[string]interface{}); ok {
+							actualConfigData = innerConfig
+						} else {
+							// 如果不是map类型，直接使用原数据
+							actualConfigData = configData
+						}
+						break
+					}
+				} else {
+					// 新格式：不带key，直接使用configData
+					actualConfigData = configData
+				}
+
+				// 组装成与 config.yaml 相同的格式
+				configItem := gin.H{
+					"provider":   config.Provider,
+					"name":       config.Name,
+					"is_default": config.IsDefault,
+				}
+				// 将 actualConfigData 中的字段展开到 configItem 中
+				for k, v := range actualConfigData {
+					configItem[k] = v
+				}
+				// 使用 config_id 作为 key
+				vadConfigMap[config.ConfigID] = configItem
+
+				// 如果当前配置是默认配置，将 config_id 赋值给顶层的 provider 字段
+				if config.IsDefault {
+					vadConfigMap["provider"] = config.ConfigID
+				}
+			}
+		}
+		if len(vadConfigMap) > 0 {
+			response["vad"] = vadConfigMap
+		}
+	}
+
+	// 处理 ASR 配置，返回格式与 config.yaml 一致，使用 config_id 作为 key
+	if asrConfigs, exists := configsByType["asr"]; exists && len(asrConfigs) > 0 {
+		asrConfigMap := make(gin.H)
+		for _, config := range asrConfigs {
+			if config.Enabled { // 只返回启用的配置
+				configData := make(map[string]interface{})
+				if config.JsonData != "" {
+					json.Unmarshal([]byte(config.JsonData), &configData)
+				}
+
+				// 组装成与 config.yaml 相同的格式
+				configItem := gin.H{
+					"provider":   config.Provider,
+					"name":       config.Name,
+					"is_default": config.IsDefault,
+				}
+				// 将 configData 中的字段展开到 configItem 中
+				for k, v := range configData {
+					configItem[k] = v
+				}
+				// 使用 config_id 作为 key
+				asrConfigMap[config.ConfigID] = configItem
+
+				// 如果当前配置是默认配置，将 config_id 赋值给顶层的 provider 字段
+				if config.IsDefault {
+					asrConfigMap["provider"] = config.ConfigID
+				}
+			}
+		}
+		if len(asrConfigMap) > 0 {
+			response["asr"] = asrConfigMap
+		}
+	}
+
+	// 处理 LLM 配置，返回格式与 config.yaml 一致，使用 config_id 作为 key
+	if llmConfigs, exists := configsByType["llm"]; exists && len(llmConfigs) > 0 {
+		llmConfigMap := make(gin.H)
+		for _, config := range llmConfigs {
+			if config.Enabled { // 只返回启用的配置
+				configData := make(map[string]interface{})
+				if config.JsonData != "" {
+					json.Unmarshal([]byte(config.JsonData), &configData)
+				}
+
+				// 组装成与 config.yaml 相同的格式
+				configItem := gin.H{
+					"name":       config.Name,
+					"is_default": config.IsDefault,
+				}
+				// 将 configData 中的字段展开到 configItem 中
+				for k, v := range configData {
+					configItem[k] = v
+				}
+				// 使用 config_id 作为 key
+				llmConfigMap[config.ConfigID] = configItem
+
+				// 如果当前配置是默认配置，将 config_id 赋值给顶层的 provider 字段
+				if config.IsDefault {
+					llmConfigMap["provider"] = config.ConfigID
+				}
+			}
+		}
+		if len(llmConfigMap) > 0 {
+			response["llm"] = llmConfigMap
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": response})
@@ -1737,12 +1899,29 @@ func (ac *AdminController) ExportConfigs(c *gin.Context) {
 		// 根据配置类型组织数据
 		switch config.Type {
 		case "vad":
+			// 兼容旧格式：如果只有一个key，说明是旧格式（带key），提取出内部配置
+			var actualConfigData map[string]interface{}
+			if len(jsonData) == 1 {
+				// 旧格式：只有一个key，提取其值
+				for _, value := range jsonData {
+					if innerConfig, ok := value.(map[string]interface{}); ok {
+						actualConfigData = innerConfig
+					} else {
+						// 如果不是map类型，直接使用原数据
+						actualConfigData = jsonData
+					}
+					break
+				}
+			} else {
+				// 新格式：不带key，直接使用jsonData
+				actualConfigData = jsonData
+			}
 			// 如果是默认配置，设置provider字段
 			if config.IsDefault {
 				exportConfig.VAD["provider"] = config.ConfigID
 			}
 			// 使用ConfigID作为key
-			exportConfig.VAD[config.ConfigID] = jsonData
+			exportConfig.VAD[config.ConfigID] = actualConfigData
 		case "asr":
 			if config.IsDefault {
 				exportConfig.ASR["provider"] = config.ConfigID

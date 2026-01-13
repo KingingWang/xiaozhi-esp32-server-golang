@@ -377,3 +377,10 @@ func (p *EdgeOfflineTTSProvider) TextToSpeechStream(ctx context.Context, text st
 
 	return outputChan, nil
 }
+
+// SetVoice 设置音色参数（EdgeOffline 不支持动态设置音色，但不报错）
+func (p *EdgeOfflineTTSProvider) SetVoice(voiceConfig map[string]interface{}) error {
+	// EdgeOffline 通过 WebSocket 连接，音色由服务端控制，不支持客户端动态设置
+	// 返回 nil 表示操作成功（虽然实际上不执行任何操作）
+	return nil
+}

@@ -602,6 +602,11 @@ func (p *XiaozhiProvider) GetVoiceInfo() map[string]interface{} {
 	}
 }
 
+// SetVoice 设置音色参数（Xiaozhi Provider 不支持动态设置音色）
+func (p *XiaozhiProvider) SetVoice(voiceConfig map[string]interface{}) error {
+	return fmt.Errorf("Xiaozhi TTS Provider 不支持动态设置音色")
+}
+
 // TextToSpeech 实现 BaseTTSProvider 接口，直接聚合流式帧
 func (p *XiaozhiProvider) TextToSpeech(ctx context.Context, text string, sampleRate int, channels int, frameDuration int) ([][]byte, error) {
 	ch, err := p.TextToSpeechStream(ctx, text, sampleRate, channels, frameDuration)

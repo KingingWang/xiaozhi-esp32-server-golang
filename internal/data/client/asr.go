@@ -4,17 +4,15 @@ import (
 	"bytes"
 	"context"
 	"sync"
-	"xiaozhi-esp32-server-golang/internal/domain/asr"
 	asr_types "xiaozhi-esp32-server-golang/internal/domain/asr/types"
 	log "xiaozhi-esp32-server-golang/logger"
 )
 
 type Asr struct {
 	lock sync.RWMutex
-	// ASR 提供者
+	// ASR 上下文和通道
 	Ctx              context.Context
 	Cancel           context.CancelFunc
-	AsrProvider      asr.AsrProvider
 	AsrEnd           chan bool
 	AsrAudioChannel  chan []float32                 //流式音频输入的channel
 	AsrResultChannel chan asr_types.StreamingResult //流式输出asr识别到的结果片断

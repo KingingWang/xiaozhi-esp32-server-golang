@@ -13,6 +13,7 @@ import (
 	"xiaozhi-esp32-server-golang/internal/data/history"
 	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
 	config_types "xiaozhi-esp32-server-golang/internal/domain/config/types"
+	"xiaozhi-esp32-server-golang/internal/pool"
 	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
 
@@ -65,6 +66,10 @@ func (a *App) Run() {
 	a.registerHandler()
 
 	a.initEventHandle()
+
+	// 启动资源池统计监控（每10秒输出一次）
+	ctx := context.Background()
+	pool.StartStatsMonitor(ctx, 10*time.Second)
 
 	select {} // 阻塞主线程
 }

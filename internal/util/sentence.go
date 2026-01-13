@@ -1,12 +1,14 @@
-package llm
+package util
 
 import (
-	"regexp"
+	"bytes"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 var (
+	// punctuationMap 句子结束和暂停的标点符号映射
 	punctuationMap = map[rune]bool{
 		'。':  true,
 		'？':  true,
@@ -21,6 +23,7 @@ var (
 		':':  true,
 	}
 
+	// firstPunctuation 首次处理时使用的标点符号映射（包含逗号）
 	firstPunctuation = map[rune]bool{
 		'，':  true,
 		',':  true,
@@ -37,6 +40,12 @@ var (
 		':':  true,
 	}
 
+	// 句子结束的标点符号
+	sentenceEndPunctuation = []rune{'.', '。', '!', '！', '?', '？', '\n'}
+
+	// 句子暂停的标点符号（可以作为长句子的断句点）
+	sentencePausePunctuation = []rune{',', '，', ';', '；', ':', '：'}
+
 	// 用于复用的对象池
 	builderPool = sync.Pool{
 		New: func() interface{} {
@@ -51,12 +60,79 @@ var (
 			return &slice
 		},
 	}
-
-	// 预编译正则表达式
-	numberPrefixRegex = regexp.MustCompile(`(?m)^[\s]*\d{1,3}\.$`)
 )
 
-// 使用快速的字符检查替代正则
+// IsSentenceEndPunctuation 判断一个字符是否为句子结束的标点符号
+func IsSentenceEndPunctuation(r rune) bool {
+	for _, p := range sentenceEndPunctuation {
+		if r == p {
+			return true
+		}
+	}
+	return false
+}
+
+// IsSentencePausePunctuation 判断一个字符是否为句子暂停的标点符号
+func IsSentencePausePunctuation(r rune) bool {
+	for _, p := range sentencePausePunctuation {
+		if r == p {
+			return true
+		}
+	}
+	return false
+}
+
+// IsNumberWithDot 判断字符串是否为数字加点号格式（如"1."、"2."等）
+func IsNumberWithDot(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	if len(trimmed) < 2 || trimmed[len(trimmed)-1] != '.' {
+		return false
+	}
+
+	for i := 0; i < len(trimmed)-1; i++ {
+		if !unicode.IsDigit(rune(trimmed[i])) {
+			return false
+		}
+	}
+	return true
+}
+
+// ExtractCompleteSentences 从文本中提取完整的句子
+// 返回完整句子的切片和剩余的未完成内容
+func ExtractCompleteSentences(text string) ([]string, string) {
+	if text == "" {
+		return []string{}, ""
+	}
+
+	var sentences []string
+	var currentSentence bytes.Buffer
+
+	runes := []rune(text)
+	lastIndex := len(runes) - 1
+
+	for i, r := range runes {
+		currentSentence.WriteRune(r)
+
+		// 判断句子是否结束
+		if IsSentenceEndPunctuation(r) {
+			// 如果是句子结束标点
+			sentence := strings.TrimSpace(currentSentence.String())
+			if sentence != "" {
+				sentences = append(sentences, sentence)
+			}
+			currentSentence.Reset()
+		} else if i == lastIndex {
+			// 如果是最后一个字符但不是句子结束标点，保留在remaining中
+			break
+		}
+	}
+
+	// 当前未完成的句子作为remaining返回
+	remaining := currentSentence.String()
+	return sentences, strings.TrimSpace(remaining)
+}
+
+// isNumberPrefix 使用快速的字符检查替代正则，判断是否是序号前缀
 func isNumberPrefix(text []rune, pos int) bool {
 	if pos <= 0 || text[pos] != '.' {
 		return false
@@ -90,7 +166,7 @@ func isNumberPrefix(text []rune, pos int) bool {
 	return foundDigit
 }
 
-// 去除首尾空白字符
+// trimSpaceRunes 去除首尾空白字符
 func trimSpaceRunes(text []rune) []rune {
 	start, end := 0, len(text)-1
 
@@ -108,8 +184,8 @@ func trimSpaceRunes(text []rune) []rune {
 	return text[start : end+1]
 }
 
+// findLastPunctuation 从后向前查找最后一个标点
 func findLastPunctuation(text []rune, separatorMap map[rune]bool) int {
-	// 从后向前查找最后一个标点
 	lastPos := -1
 	for i := len(text) - 1; i >= 0; i-- {
 		// 检查是否是标点符号
@@ -124,6 +200,7 @@ func findLastPunctuation(text []rune, separatorMap map[rune]bool) int {
 	return lastPos
 }
 
+// findNextSplitPoint 查找下一个分割点
 func findNextSplitPoint(text []rune, startPos int, maxLen int, separatorMap map[rune]bool) int {
 	// 计算查找的结束位置
 	endPos := startPos + maxLen
@@ -165,8 +242,13 @@ func findNextSplitPoint(text []rune, startPos int, maxLen int, separatorMap map[
 	return -1
 }
 
-func extractSmartSentences(text string, minLen, maxLen int, isFirst bool) (sentences []string, remaining string) {
-	//当isFirst为true时, 放宽到逗号作为分隔符
+// ExtractSmartSentences 智能提取句子
+// text: 待处理的文本
+// minLen: 最小句子长度
+// maxLen: 最大句子长度
+// isFirst: 是否为首次处理（首次处理时允许使用逗号作为分隔符）
+func ExtractSmartSentences(text string, minLen, maxLen int, isFirst bool) (sentences []string, remaining string) {
+	// 当isFirst为true时, 放宽到逗号作为分隔符
 	separatorMap := punctuationMap
 	if isFirst {
 		separatorMap = firstPunctuation
@@ -239,8 +321,8 @@ func extractSmartSentences(text string, minLen, maxLen int, isFirst bool) (sente
 	return sentences, remaining
 }
 
-// 判断字符串中是否包含分隔符（句子结束或暂停标点符号）
-func containsSentenceSeparator(s string, isFirst bool) bool {
+// ContainsSentenceSeparator 判断字符串中是否包含分隔符（句子结束或暂停标点符号）
+func ContainsSentenceSeparator(s string, isFirst bool) bool {
 	for _, r := range s {
 		if isFirst {
 			if firstPunctuation[r] {

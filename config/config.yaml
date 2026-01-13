@@ -85,6 +85,16 @@ udp:
   listen_host: "0.0.0.0"      # 监听地址
   listen_port: 8990           # 监听端口
 
+# 资源池配置（所有资源类型共享默认配置）
+resource_pools:
+  max_size: 50              # 最大资源数量
+  min_size: 5               # 最小资源数量（预创建）
+  max_idle: 20              # 最大空闲资源数量
+  acquire_timeout: 5s       # 获取资源超时时间
+  idle_timeout: 10m         # 资源空闲超时时间
+  validate_on_borrow: true  # 获取时是否验证资源
+  validate_on_return: false  # 归还时是否验证资源
+
 # 语音活动检测（VAD）配置
 vad:
   provider: "webrtc_vad"  # VAD提供商：webrtc_vad 或 silero_vad
